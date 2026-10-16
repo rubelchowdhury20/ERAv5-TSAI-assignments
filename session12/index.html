@@ -1,0 +1,2453 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Distributed Training Visualizer — GPU Communication</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<style>
+/* ============================================================
+   1. THEME TOKENS
+   ============================================================ */
+:root{
+  --bg:#080b11;
+  --glow-1:rgba(34,211,238,.09);
+  --glow-2:rgba(167,139,250,.08);
+  --glow-3:rgba(52,211,153,.05);
+  --card-a:rgba(255,255,255,.035); --card-b:rgba(255,255,255,.006);
+  --fill:rgba(255,255,255,.03); --fill-hover:rgba(255,255,255,.06); --fill-strong:rgba(255,255,255,.10);
+  --inset:rgba(0,0,0,.28); --track:rgba(0,0,0,.45); --dot:rgba(255,255,255,.16);
+  --hairline:rgba(255,255,255,.045); --tooltip-bg:#0c1220;
+  --topbar-a:rgba(8,11,17,.92); --topbar-b:rgba(8,11,17,.72);
+  --border:rgba(255,255,255,.07); --border-strong:rgba(255,255,255,.12);
+  --text:#e6edf6; --muted:#8b97a8; --muted-2:#5f6b7c;
+  --weights:#22d3ee; --grads:#f59e0b; --opt:#a78bfa; --acts:#34d399;
+  --nvlink:#22d3ee; --ib:#f59e0b; --oom:#f43f5e;
+  --ease:cubic-bezier(.2,.8,.2,1); --dur-1:150ms; --dur-2:240ms; --dur-3:320ms;
+  --radius:18px; --radius-sm:12px; --radius-xs:9px;
+}
+[data-theme="light"]{
+  --bg:#eef1f7;
+  --glow-1:rgba(8,145,178,.10); --glow-2:rgba(124,58,237,.08); --glow-3:rgba(5,150,105,.06);
+  --card-a:#ffffff; --card-b:#fbfcff;
+  --fill:rgba(15,23,42,.03); --fill-hover:rgba(15,23,42,.06); --fill-strong:rgba(15,23,42,.09);
+  --inset:rgba(15,23,42,.04); --track:rgba(15,23,42,.10); --dot:rgba(15,23,42,.16);
+  --hairline:rgba(15,23,42,.06); --tooltip-bg:#ffffff;
+  --topbar-a:rgba(238,241,247,.92); --topbar-b:rgba(238,241,247,.72);
+  --border:rgba(15,23,42,.10); --border-strong:rgba(15,23,42,.16);
+  --text:#0d1420; --muted:#5a6474; --muted-2:#8590a3;
+  --weights:#0891b2; --grads:#b45309; --opt:#7c3aed; --acts:#047857;
+  --nvlink:#0891b2; --ib:#b45309; --oom:#e11d48;
+}
+
+/* ============================================================
+   2. BASE
+   ============================================================ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;min-height:100vh;color:var(--text);font-family:'Inter',system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  background:
+    radial-gradient(1200px 620px at 12% -10%, var(--glow-1), transparent 60%),
+    radial-gradient(1000px 520px at 92% -6%, var(--glow-2), transparent 55%),
+    radial-gradient(900px 700px at 50% 120%, var(--glow-3), transparent 60%), var(--bg);
+  transition:background-color var(--dur-3) var(--ease), color var(--dur-3) var(--ease);
+}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--fill-strong);border-radius:99px;border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--dot);background-clip:padding-box}
+:focus-visible{outline:2px solid var(--weights);outline-offset:2px;border-radius:8px}
+
+/* ============================================================
+   3. COMPONENT VOCABULARY
+   ============================================================ */
+.card{background:linear-gradient(180deg,var(--card-a),var(--card-b));border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:0 1px 0 var(--hairline) inset,0 24px 48px -30px rgba(0,0,0,.4);backdrop-filter:blur(10px);
+  transition:background var(--dur-3) var(--ease),border-color var(--dur-3) var(--ease)}
+.card-hd{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--border)}
+.card-hd h3{margin:0;font-size:13px;font-weight:600;letter-spacing:.02em}
+.card-bd{padding:18px}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted-2)}
+
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:99px;font-size:11px;font-weight:600;line-height:1;white-space:nowrap;
+  border:1px solid var(--border-strong);background:var(--fill);color:var(--muted)}
+.chip .dot{width:7px;height:7px;border-radius:99px;background:currentColor;box-shadow:0 0 10px currentColor}
+.chip.weights{color:var(--weights);border-color:color-mix(in srgb,var(--weights) 34%,transparent);background:color-mix(in srgb,var(--weights) 12%,transparent)}
+.chip.grads{color:var(--grads);border-color:color-mix(in srgb,var(--grads) 34%,transparent);background:color-mix(in srgb,var(--grads) 12%,transparent)}
+.chip.opt{color:var(--opt);border-color:color-mix(in srgb,var(--opt) 34%,transparent);background:color-mix(in srgb,var(--opt) 12%,transparent)}
+.chip.acts{color:var(--acts);border-color:color-mix(in srgb,var(--acts) 34%,transparent);background:color-mix(in srgb,var(--acts) 12%,transparent)}
+.chip.oom{color:var(--oom);border-color:color-mix(in srgb,var(--oom) 40%,transparent);background:color-mix(in srgb,var(--oom) 12%,transparent)}
+
+.stat{display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--fill);min-width:0}
+.stat .k{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted-2);font-weight:600}
+.stat .v{font-size:17px;font-weight:600;line-height:1.15}
+.stat .v small{font-size:11px;color:var(--muted);font-weight:500}
+
+.seg{display:inline-flex;gap:3px;padding:3px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--inset)}
+.seg button{appearance:none;border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:600;padding:7px 12px;border-radius:var(--radius-xs);cursor:pointer;white-space:nowrap;
+  transition:color var(--dur-1) var(--ease),background var(--dur-1) var(--ease),box-shadow var(--dur-1) var(--ease)}
+.seg button:hover{color:var(--text);background:var(--fill-hover)}
+.seg button[aria-pressed="true"]{color:#04121a;background:linear-gradient(180deg,#67e8f9,var(--weights));box-shadow:0 6px 18px -8px color-mix(in srgb,var(--weights) 85%,transparent)}
+[data-theme="light"] .seg button[aria-pressed="true"]{color:#fff;background:linear-gradient(180deg,#0ea5c4,#0891b2)}
+.seg.seg-soft button[aria-pressed="true"]{color:var(--text);background:var(--fill-strong);box-shadow:inset 0 0 0 1px var(--border-strong)}
+
+.expander{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--fill);overflow:hidden}
+.expander > summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;padding:12px 14px;font-size:12.5px;font-weight:600;transition:background var(--dur-1) var(--ease)}
+.expander > summary::-webkit-details-marker{display:none}
+.expander > summary:hover{background:var(--fill-hover)}
+.expander > summary .chev{margin-left:auto;color:var(--muted);transition:transform var(--dur-2) var(--ease)}
+.expander[open] > summary .chev{transform:rotate(90deg)}
+.expander .expander-bd{padding:2px 14px 14px;font-size:12.5px;line-height:1.65;color:var(--muted)}
+.expander .expander-bd strong{color:var(--text)}
+
+.btn{appearance:none;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border-strong);background:var(--fill);color:var(--text);font:inherit;font-size:12.5px;font-weight:600;padding:9px 14px;border-radius:var(--radius-xs);cursor:pointer;
+  transition:transform var(--dur-1) var(--ease),background var(--dur-2) var(--ease),border-color var(--dur-2) var(--ease),box-shadow var(--dur-2) var(--ease)}
+.btn:hover{background:var(--fill-hover);transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn.primary{background:linear-gradient(180deg,#67e8f9,var(--weights));color:#04121a;border-color:transparent;box-shadow:0 8px 22px -10px color-mix(in srgb,var(--weights) 90%,transparent)}
+.btn.icon{padding:9px}
+
+.term{border-bottom:1px dashed color-mix(in srgb,var(--weights) 55%,transparent);cursor:help;color:var(--text)}
+.tip{position:relative}
+.tip::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 9px);transform:translate(-50%,4px);width:max-content;max-width:240px;padding:8px 10px;border-radius:10px;background:var(--tooltip-bg);
+  border:1px solid var(--border-strong);color:var(--text);font-size:11.5px;line-height:1.45;font-weight:500;opacity:0;pointer-events:none;
+  transition:opacity var(--dur-2) var(--ease),transform var(--dur-2) var(--ease);box-shadow:0 20px 40px -20px rgba(0,0,0,.6);z-index:60}
+.tip:hover::after{opacity:1;transform:translate(-50%,0)}
+
+/* ============================================================
+   4. ORIENTATION (legacy — retained for any inline reuse)
+   ============================================================ */
+.obj-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.obj-list li{display:flex;gap:10px;font-size:12.5px;line-height:1.5;color:var(--muted)}
+.obj-list li b{color:var(--text);font-weight:600}
+.obj-list .ico{flex:none;margin-top:1px}
+
+/* ============================================================
+   5. GPU RING CANVAS — always-light "paper" surface
+   ============================================================ */
+.topo-stage{
+  position:relative;border-radius:14px;overflow:hidden;color:#0d1420;
+  background:#f7f8f5;
+  background-image:
+    linear-gradient(rgba(15,23,42,.045) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(15,23,42,.045) 1px,transparent 1px);
+  background-size:22px 22px;
+  border:1px solid rgba(15,23,42,.10);
+  box-shadow:inset 0 0 60px rgba(15,23,42,.04);
+  padding:18px 16px 72px;
+  transition:opacity var(--dur-3) var(--ease),box-shadow var(--dur-3) var(--ease);
+}
+/* live commentary subtitle */
+.stage-caption{
+  position:absolute;left:12px;right:12px;bottom:11px;z-index:8;
+  display:flex;align-items:center;gap:10px;
+  background:rgba(12,18,28,.90);color:#e6edf6;
+  border:1px solid rgba(255,255,255,.12);border-radius:11px;
+  padding:8px 12px;backdrop-filter:blur(7px);
+  box-shadow:0 14px 34px -20px rgba(0,0,0,.75);font-size:12.5px;line-height:1.45;
+}
+.sc-live{display:inline-flex;align-items:center;gap:5px;flex:none;font-size:9.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#67e8f9}
+.sc-dot{width:6px;height:6px;border-radius:99px;background:#22d3ee;box-shadow:0 0 8px #22d3ee;animation:scPulse 1.4s var(--ease) infinite}
+@keyframes scPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+.sc-chip{flex:none}
+.sc-text{color:#dbe4f0;min-width:0}
+.sc-text b{color:#fff}
+.beat-in{animation:beatIn .28s var(--ease)}
+@keyframes beatIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.sc-dot{animation:none}}
+.ring-wrap{position:relative;display:flex;align-items:center;justify-content:center;gap:clamp(12px,4vw,34px);flex-wrap:wrap}
+
+.ring-node{position:relative;flex:1 1 0;min-width:0;max-width:340px;aspect-ratio:1/1;container-type:inline-size}
+.ring-node::before{
+  content:'';position:absolute;inset:7%;border-radius:50%;
+  border:1.5px solid rgba(8,145,178,.30);
+  background:radial-gradient(circle at 50% 50%,rgba(8,145,178,.06),transparent 62%);
+  box-shadow:inset 0 0 40px rgba(8,145,178,.06);
+}
+.ring-node.n1::before{
+  border-color:rgba(180,83,9,.34);
+  background:radial-gradient(circle at 50% 50%,rgba(217,119,6,.07),transparent 62%);
+  box-shadow:inset 0 0 40px rgba(217,119,6,.06);
+}
+.node-label{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;width:56%}
+.nl-name{font-size:12.5px;font-weight:800;letter-spacing:.01em;color:#0f172a}
+.nl-sub{font-size:10px;color:#5a6474;font-weight:600;margin-top:2px}
+.nl-badge{margin-top:6px;display:inline-block;font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:99px;color:#0e7490;background:rgba(8,145,178,.10);border:1px solid rgba(8,145,178,.28)}
+.ring-node.n1 .nl-badge{color:#b45309;background:rgba(217,119,6,.10);border-color:rgba(180,83,9,.28)}
+
+/* GPU icon on the ring — anchored on its chip centre, scales with the node size */
+.gpu{position:absolute;width:44px;height:44px;width:clamp(26px,13.5cqw,46px);height:clamp(26px,13.5cqw,46px);
+  transition:opacity var(--dur-2) var(--ease),filter var(--dur-2) var(--ease)}
+.gpu.blur{opacity:.30;filter:blur(1.1px) grayscale(.4)}
+.gpu .chip{width:100%;height:100%;display:grid;place-items:center;border-radius:24%;
+  background:linear-gradient(180deg,#ffffff,#eef1f5);border:1px solid rgba(15,23,42,.16);
+  box-shadow:0 1px 3px rgba(15,23,42,.12)}
+.gpu .chip svg{width:66%;height:66%;display:block}
+.gpu.oob .chip{border-color:rgba(225,29,72,.55);box-shadow:0 0 0 1px rgba(225,29,72,.25),0 2px 10px rgba(225,29,72,.22)}
+.gpu.sel{opacity:1;filter:none;z-index:7}
+.gpu.sel .chip{border-color:#0f172a;box-shadow:0 0 0 3px rgba(15,23,42,.9),0 0 0 6px rgba(255,255,255,.75),0 6px 16px rgba(15,23,42,.3)}
+.gpu[data-gpu]{cursor:pointer}
+.gpu .gid{position:absolute;left:50%;top:calc(100% + 1px);transform:translateX(-50%);white-space:nowrap;line-height:1.2;
+  font-size:clamp(7px,2.7cqw,8.5px);font-weight:700;color:#334155}
+.gpu.oob .gid{color:#be123c}
+.gpu .mini-bar{position:absolute;left:50%;top:calc(100% + 12px);transform:translateX(-50%);width:100%;height:5px;
+  border-radius:99px;overflow:hidden;background:rgba(15,23,42,.10);display:flex;border:1px solid rgba(15,23,42,.06)}
+.gpu .mini-bar span{display:block;height:100%}
+
+/* continuation tail for capped populations */
+.gpu-tail{position:absolute;display:flex;flex-direction:column;align-items:center;gap:2px;pointer-events:none}
+.gpu-tail .plus{font-size:10px;font-weight:800;color:#0e7490;background:rgba(255,255,255,.9);border:1px dashed rgba(8,145,178,.55);border-radius:10px;padding:5px 7px;line-height:1}
+.gpu-tail .tlab{font-size:7.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#64748b}
+
+.ring-bridge{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:5px;align-self:center;color:#b45309}
+.ring-bridge .line{width:clamp(18px,5vw,54px);border-top:2px dashed rgba(180,83,9,.55)}
+.ring-bridge .lbl{font-size:8.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:#b45309;white-space:nowrap}
+.ring-bridge i{color:#b45309}
+
+/* ghost ring for "more nodes" */
+.ring-ghost{position:relative;flex:0 0 auto;width:min(150px,34%);aspect-ratio:1/1;display:grid;place-items:center;opacity:.55}
+.ring-ghost::before{content:'';position:absolute;inset:7%;border-radius:50%;border:1.5px dashed rgba(15,23,42,.28);background:repeating-conic-gradient(rgba(15,23,42,.03) 0 6deg,transparent 6deg 12deg)}
+.ring-ghost .gt{font-size:11px;font-weight:800;color:#475569;background:rgba(255,255,255,.85);padding:3px 10px;border-radius:99px;border:1px solid rgba(15,23,42,.12)}
+.ring-note{position:absolute;left:14px;top:10px;font-size:10px;font-weight:600;color:#64748b}
+
+/* flow animation overlay */
+.flow-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible;z-index:6}
+.packet{transition:opacity .1s linear}
+.gpu.pulse .chip{border-color:rgba(8,145,178,.7);box-shadow:0 0 0 2px rgba(8,145,178,.35),0 0 22px rgba(8,145,178,.55)}
+.gpu.pulse.grads .chip{border-color:rgba(217,119,6,.75);box-shadow:0 0 0 2px rgba(217,119,6,.35),0 0 22px rgba(217,119,6,.55)}
+.gpu.pulse.opt .chip{border-color:rgba(124,58,237,.75);box-shadow:0 0 0 2px rgba(124,58,237,.35),0 0 22px rgba(124,58,237,.55)}
+.flow-chip-wrap{display:flex;align-items:center;gap:8px}
+
+/* GPU X-ray — one magnified GPU, live memory breakdown */
+.xray-split{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:980px){ .xray-split{grid-template-columns:1fr} }
+.xray{display:flex;flex-direction:column;gap:12px;min-width:0}
+.xray-head{display:flex;align-items:center;gap:11px}
+.xray-gpu{width:46px;height:46px;flex:none;border-radius:13px;display:grid;place-items:center;
+  background:linear-gradient(180deg,#fff,#eef1f5);border:1px solid rgba(15,23,42,.16);box-shadow:0 2px 7px rgba(15,23,42,.14)}
+.xray-gpu svg{width:70%;height:70%;display:block}
+.xray-id{min-width:0}
+.xray-name{font-size:13.5px;font-weight:800;letter-spacing:-.01em}
+.xray-sub{font-size:10.5px;color:var(--muted);font-weight:600;margin-top:1px}
+.xray-bar{position:relative;display:flex;height:34px;border-radius:10px;overflow:hidden;
+  border:1px solid var(--border);background:var(--track)}
+.xray-seg{height:100%;position:relative;transition:width .35s linear,filter var(--dur-2) var(--ease),opacity var(--dur-2) var(--ease)}
+.xray-seg:not(:last-child){border-right:1px solid rgba(0,0,0,.18)}
+.xray-seg.on{filter:brightness(1.28) saturate(1.15);box-shadow:inset 0 0 0 2px rgba(255,255,255,.85),0 0 16px rgba(255,255,255,.25);z-index:2}
+.xray-seg.dim{opacity:.32;filter:grayscale(.35)}
+.xray-limit{position:absolute;top:-3px;bottom:-3px;width:0;border-left:2px dashed var(--oom);z-index:4;pointer-events:none}
+.xray-scale{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);font-weight:600;margin-top:-4px}
+.xray-list{display:flex;flex-direction:column;gap:5px}
+.xray-item{display:flex;align-items:center;gap:8px;font-size:11px;line-height:1.3}
+.xray-item .dotc{width:9px;height:9px;border-radius:3px;flex:none}
+.xray-item .lb{color:var(--text);font-weight:600;min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xray-item .val{font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:nowrap}
+.xray-item .chip{flex:none;font-size:9px;padding:1px 6px}
+.xray-item.on .lb{font-weight:800}
+.xray-legend{font-size:10.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:3px 12px;border-top:1px solid var(--hairline);padding-top:9px}
+.xray-legend b{color:var(--text)}
+/* X-ray nested inside the topology card flattens into a sub-panel */
+#xrayHost .xray-card{background:transparent;border:0;box-shadow:none}
+#xrayHost .xray-card > .card-bd{padding:0}
+#xrayHost .xray-card > .card-hd{border-bottom:0;padding:0 0 10px}
+.replicated-note{font-size:11.5px;color:var(--muted);margin-top:12px;display:flex;align-items:flex-start;gap:8px}
+
+/* Phase B — training loop: reveal beat + completion state */
+body.reveal-on .topo-stage{opacity:.40}
+body.reveal-on .xray-bar{box-shadow:0 0 0 2px var(--weights),0 0 22px -3px var(--weights)}
+body.reveal-on .xray-item.on .lb{color:var(--weights)}
+body.reveal-on .xray{animation:revealGlow 1.7s var(--ease) infinite}
+@keyframes revealGlow{
+  0%,100%{filter:none}
+  50%{filter:drop-shadow(0 0 10px color-mix(in srgb,var(--weights) 50%,transparent))}
+}
+body.loop-complete .topo-stage{box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--acts) 60%,transparent),inset 0 0 60px rgba(15,23,42,.04)}
+@media (prefers-reduced-motion:reduce){ body.reveal-on .xray{animation:none} }
+
+/* log rows: iteration tag + reveal/complete emphasis */
+.log-time small{display:block;font-size:8px;color:var(--muted-2);font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+.log-entry.reveal{background:color-mix(in srgb,var(--weights) 9%,transparent);box-shadow:inset 2px 0 0 var(--weights)}
+.log-entry.done{background:color-mix(in srgb,var(--acts) 11%,transparent);box-shadow:inset 2px 0 0 var(--acts)}
+
+/* ============================================================
+   6. LOG
+   ============================================================ */
+.log{display:flex;flex-direction:column;max-height:620px}
+.log-body{overflow-y:auto;padding:6px 8px 14px;display:flex;flex-direction:column;gap:2px}
+.log-entry{display:grid;grid-template-columns:56px 1fr;gap:10px;padding:9px 10px;border-radius:10px;transition:background var(--dur-2) var(--ease)}
+.log-entry:hover{background:var(--fill-hover)}
+.log-entry.active{background:color-mix(in srgb,var(--weights) 9%,transparent);box-shadow:inset 2px 0 0 var(--weights)}
+.log-time{font-size:10.5px;color:var(--muted-2);padding-top:2px}
+.log-main{font-size:12.5px;line-height:1.55;color:var(--muted)}
+.log-main b{color:var(--text);font-weight:600}
+.log-prim{display:inline-flex;margin-bottom:5px}
+
+/* ============================================================
+   7. TRANSPORT
+   ============================================================ */
+.transport{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.progress{flex:1;min-width:200px;height:8px;border-radius:99px;background:var(--track);border:1px solid var(--border);overflow:hidden}
+.progress i{display:block;height:100%;width:38%;background:linear-gradient(90deg,var(--weights),var(--opt));box-shadow:0 0 18px color-mix(in srgb,var(--weights) 50%,transparent);transition:width var(--dur-3) var(--ease)}
+.phase-dots{display:flex;gap:6px;align-items:center}
+.phase-dots i{width:8px;height:8px;border-radius:99px;background:var(--dot)}
+.phase-dots i.on{background:var(--weights);box-shadow:0 0 12px var(--weights)}
+
+/* ============================================================
+   8. CHARTS
+   ============================================================ */
+.chart-box{position:relative;height:250px}
+.chart-box > canvas{width:100% !important;height:100% !important}
+@media (max-width:640px){.chart-box{height:210px}}
+
+
+table.dt{width:100%;border-collapse:collapse;font-size:12px}
+table.dt th{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted-2);font-weight:700;padding:10px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
+table.dt td{padding:11px 12px;border-bottom:1px solid var(--hairline);color:var(--muted)}
+table.dt tr:hover td{background:var(--fill)}
+table.dt td.name{color:var(--text);font-weight:600}
+table.dt tr.active-row td{background:color-mix(in srgb,var(--weights) 8%,transparent)}
+.tag-fit{color:var(--acts);font-weight:700}
+.tag-oom{color:var(--oom);font-weight:700}
+
+/* feasibility grid */
+.feas-grid{display:flex;flex-direction:column;gap:2px}
+.feas-row{display:grid;grid-template-columns:1.4fr 1fr .7fr .9fr;gap:10px;align-items:center;padding:9px 12px;border-radius:9px;font-size:12.5px;color:var(--muted);cursor:pointer;transition:background var(--dur-1) var(--ease)}
+.feas-row.feas-head{cursor:default;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted-2);font-weight:700;padding:0 12px 8px}
+.feas-row:not(.feas-head):hover{background:var(--fill-hover)}
+.feas-row.active{background:color-mix(in srgb,var(--weights) 10%,transparent);color:var(--text)}
+.feas-row.active .feas-name{color:var(--text);font-weight:700}
+.feas-name{color:var(--text);font-weight:600;white-space:nowrap}
+.feas-mem,.feas-comm{font-size:12px}
+
+/* lock panel */
+.lock-state{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.lock-ico{flex:none;width:38px;height:38px;border-radius:11px;display:grid;place-items:center;color:var(--muted);background:var(--fill);border:1px solid var(--border-strong)}
+.lock-state.locked .lock-ico{color:var(--grads);border-color:color-mix(in srgb,var(--grads) 40%,transparent);background:color-mix(in srgb,var(--grads) 12%,transparent)}
+.lock-txt{flex:1;min-width:150px}
+.lock-title{font-size:13.5px;font-weight:700;color:var(--text)}
+.lock-sub{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.5}
+.lock-state .btn{margin-left:auto}
+
+/* ============================================================
+   9. HEADER / LAYOUT
+   ============================================================ */
+.topbar{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);background:linear-gradient(180deg,var(--topbar-a),var(--topbar-b));border-bottom:1px solid var(--border);transition:background var(--dur-3) var(--ease)}
+.icon-btn{appearance:none;display:grid;place-items:center;width:36px;height:36px;border-radius:11px;cursor:pointer;border:1px solid var(--border-strong);background:var(--fill);color:var(--text);transition:background var(--dur-2) var(--ease),transform var(--dur-1) var(--ease)}
+.icon-btn:hover{background:var(--fill-hover);transform:translateY(-1px)}
+.stepper{display:flex;gap:4px;overflow-x:auto;padding-bottom:2px}
+.stepper button{appearance:none;border:1px solid var(--border);background:var(--fill);color:var(--muted);font:inherit;font-size:11.5px;font-weight:600;padding:6px 11px;border-radius:99px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;white-space:nowrap;transition:all var(--dur-2) var(--ease)}
+.stepper button:hover{color:var(--text);border-color:var(--border-strong)}
+.stepper button .n{font-size:9.5px;color:var(--muted-2);font-weight:700}
+.stepper button[aria-current="true"]{color:#04121a;background:linear-gradient(180deg,#67e8f9,var(--weights));border-color:transparent;box-shadow:0 8px 22px -10px color-mix(in srgb,var(--weights) 90%,transparent)}
+[data-theme="light"] .stepper button[aria-current="true"]{color:#fff;background:linear-gradient(180deg,#0ea5c4,#0891b2)}
+.stepper button[aria-current="true"] .n{color:rgba(4,18,26,.6)}
+.hero-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.brand-mark{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;color:var(--weights);background:linear-gradient(135deg,color-mix(in srgb,var(--weights) 22%,transparent),color-mix(in srgb,var(--opt) 22%,transparent));border:1px solid var(--border-strong);box-shadow:0 10px 26px -14px color-mix(in srgb,var(--weights) 80%,transparent)}
+.wrap{max-width:1440px;margin:0 auto;padding:0 20px}
+.grid-main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:1080px){.grid-main{grid-template-columns:1fr}.grid-2{grid-template-columns:1fr}}
+@media (max-width:720px){.ring-node{max-width:none}.ring-wrap{gap:10px}}
+.reveal{opacity:0;transform:translateY(8px);animation:rise var(--dur-3) var(--ease) forwards}
+@keyframes rise{to{opacity:1;transform:none}}
+
+/* ============================================================
+   10. APP SHELL — guide / explore + options
+   ============================================================ */
+.guide-only{display:none}
+body.view-guide .guide-only{display:flex}
+body.view-guide #exploreView{display:none}
+body.view-explore #guideView{display:none}
+
+.top-progress{flex:1;max-width:440px;display:flex;align-items:center;gap:12px;margin:0 8px}
+.progress.thin{height:6px;min-width:120px;flex:1}
+
+.step{max-width:min(1220px,100%);margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.step-head{display:flex;flex-direction:column;gap:8px}
+.step-title{margin:0;font-size:26px;font-weight:800;line-height:1.2;letter-spacing:-.01em}
+.step-lede{margin:0;font-size:14.5px;line-height:1.7;color:var(--muted);max-width:72ch}
+.step-lede b{color:var(--text)}
+.analogy{border-left:3px solid color-mix(in srgb,var(--opt) 60%,transparent);background:var(--fill);border-radius:0 var(--radius-sm) var(--radius-sm) 0;padding:12px 16px;font-size:13px;line-height:1.65;color:var(--muted)}
+.analogy b{color:var(--text)}
+.step-kick-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.lock-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:99px;font-size:10.5px;font-weight:700;letter-spacing:.02em;color:var(--grads);border:1px solid color-mix(in srgb,var(--grads) 40%,transparent);background:color-mix(in srgb,var(--grads) 12%,transparent)}
+.lock-badge[hidden]{display:none}
+.lock-badge svg{display:block}
+
+.experiment{border:1px dashed color-mix(in srgb,var(--weights) 45%,var(--border));border-radius:var(--radius-sm);background:color-mix(in srgb,var(--weights) 6%,transparent);padding:14px 16px}
+.ex-hd{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--weights)}
+.ex-state{margin-left:auto;font-size:10.5px;letter-spacing:.04em;padding:3px 9px;border-radius:99px;border:1px solid var(--border-strong);color:var(--muted);white-space:nowrap}
+.ex-state.ok{color:#04121a;background:var(--acts);border-color:transparent}
+.ex-prompt{margin:9px 0 0;font-size:13.5px;line-height:1.6;color:var(--text)}
+
+.step-visual{display:flex;flex-direction:column;gap:16px}
+.step-row{display:block}
+.step-row.cols-2{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:880px){.step-row.cols-2{grid-template-columns:1fr}}
+.step-extras{display:flex;flex-direction:column;gap:12px}
+.takeaway{display:flex;flex-wrap:wrap;gap:8px}
+
+.bottom-nav{max-width:min(1220px,100%);margin:26px auto 0;display:flex;align-items:center;gap:14px}
+.bottom-nav #nextBtn{margin-left:auto}
+.step-dots{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;flex:1}
+.step-dots i{width:9px;height:9px;border-radius:99px;background:var(--dot);cursor:pointer;transition:transform var(--dur-1) var(--ease),background var(--dur-2) var(--ease)}
+.step-dots i:hover{transform:scale(1.4)}
+.step-dots i.done{background:var(--acts)}
+.step-dots i.on{background:var(--weights);box-shadow:0 0 12px var(--weights)}
+
+.options-pop{position:absolute;top:44px;right:0;width:270px;z-index:70;padding:14px;border-radius:var(--radius-sm);
+  background:var(--tooltip-bg);border:1px solid var(--border-strong);box-shadow:0 30px 60px -24px rgba(0,0,0,.7);
+  display:flex;flex-direction:column;gap:4px}
+.options-pop[hidden]{display:none}
+.op-hd{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted-2);margin:8px 0 2px}
+.op-hd:first-child{margin-top:0}
+.op-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;color:var(--text);cursor:pointer;padding:7px 8px;border-radius:9px;transition:background var(--dur-1) var(--ease)}
+.op-row:hover{background:var(--fill-hover)}
+.switch{position:relative;flex:none;width:38px;height:21px;border-radius:99px;background:var(--inset);border:1px solid var(--border-strong);transition:background var(--dur-2) var(--ease)}
+.switch i{position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:99px;background:var(--muted);transition:transform var(--dur-2) var(--ease),background var(--dur-2) var(--ease)}
+.op-row input:checked + .switch{background:linear-gradient(180deg,#67e8f9,var(--weights));border-color:transparent}
+.op-row input:checked + .switch i{transform:translateX(17px);background:#04121a}
+
+/* preference-driven visibility */
+body.pref-no-glossary .term{border-bottom:0;cursor:inherit}
+body.pref-no-glossary .term.tip::after{display:none}
+body:not(.pref-advanced) .adv-only{display:none}
+body.pref-reduced *{animation-duration:.001ms!important;transition-duration:.001ms!important}
+
+/* toast */
+.toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);z-index:90;padding:10px 16px;border-radius:99px;
+  font-size:12.5px;font-weight:600;color:var(--text);background:var(--tooltip-bg);border:1px solid var(--border-strong);
+  box-shadow:0 22px 44px -20px rgba(0,0,0,.7);opacity:0;pointer-events:none;transition:opacity var(--dur-2) var(--ease),transform var(--dur-2) var(--ease)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+/* ============================================================
+   11. CINEMA STAGE — keep flow + narration + controls together
+   ============================================================ */
+#stepVisual{scroll-margin-top:84px}
+
+/* stage layout: controls/flow on the left, live narration pinned on the right */
+.step-row.stage{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px);gap:16px;align-items:start;scroll-margin-top:84px}
+.stage-left{display:flex;flex-direction:column;gap:16px;min-width:0}
+.stage-right{min-width:0;position:sticky;top:82px}
+@media (max-width:980px){
+  .step-row.stage{grid-template-columns:1fr}
+  .stage-right{position:static}
+}
+
+/* compact everything on animation steps so it fits one screen */
+.step--anim{gap:14px}
+.step--anim .step-head{gap:5px}
+.step--anim .step-title{font-size:21px}
+.step--anim .step-lede{font-size:13px;line-height:1.6}
+.step--anim .experiment{padding:10px 14px}
+.step--anim .ex-prompt{font-size:12.5px;margin-top:6px}
+.step--anim .card-bd{padding:12px}
+.step--anim .step-visual .card,.step--anim .stage-left .card{box-shadow:0 1px 0 var(--hairline) inset,0 18px 34px -28px rgba(0,0,0,.4)}
+
+/* the phase log scrolls inside a viewport-bounded box and stays beside the flow */
+.step-row.stage .stage-right #panelLog{max-height:calc(100vh - 104px)}
+.step-row.stage .stage-right #panelLog .log-body{max-height:calc(100vh - 188px)}
+
+/* transport stays reachable while the flow plays */
+.step--anim .stage-left #panelTransport{position:sticky;bottom:10px;z-index:25}
+
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms !important;transition-duration:.001ms !important}html{scroll-behavior:auto}}
+</style>
+</head>
+
+<body>
+<div class="wrap py-5">
+
+  <!-- HEADER -->
+  <header class="topbar -mx-5 px-5 mb-5 rounded-b-2xl">
+    <div class="max-w-[1440px] mx-auto py-3 flex items-center gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="brand-mark"><i data-lucide="network" class="w-[18px] h-[18px]"></i></div>
+        <div class="min-w-0 hidden sm:block">
+          <h1 class="text-[15px] font-bold m-0 leading-tight truncate">Distributed Training Visualizer</h1>
+          <p class="text-[11.5px] m-0 leading-tight truncate" style="color:var(--muted)">A guided tour of how GPUs communicate during LLM training</p>
+        </div>
+      </div>
+
+      <div class="guide-only top-progress" id="topProgress">
+        <span class="mono text-[11.5px] whitespace-nowrap" style="color:var(--muted)" id="stepCounter">Step 1 / 18</span>
+        <div class="progress thin"><i id="topProgressBar" style="width:0"></i></div>
+      </div>
+
+      <div class="ml-auto flex items-center gap-2 relative">
+        <button class="btn primary tip" id="exploreToggle" data-tip="Switch between guided and free exploration">
+          <i data-lucide="layout-dashboard" class="w-4 h-4"></i><span id="exploreToggleLabel">Explore</span>
+        </button>
+        <button class="icon-btn tip" id="optionsBtn" data-tip="Options" aria-label="Options" aria-expanded="false"><i data-lucide="settings-2" class="w-4 h-4"></i></button>
+
+        <div class="options-pop" id="optionsPop" hidden>
+          <div class="op-hd"><i data-lucide="sliders-horizontal" class="w-3.5 h-3.5"></i>Options</div>
+          <div id="optionsList"></div>
+          <div class="op-hd"><i data-lucide="palette" class="w-3.5 h-3.5"></i>Theme</div>
+          <div class="seg seg-soft" data-seg="theme" role="group" aria-label="Theme">
+            <button data-val="dark" aria-pressed="true" style="flex:1">Dark</button>
+            <button data-val="light" aria-pressed="false" style="flex:1">Light</button>
+          </div>
+          <button class="btn w-full mt-3 justify-center" id="resetProgress"><i data-lucide="rotate-ccw" class="w-4 h-4"></i>Reset progress</button>
+        </div>
+      </div>
+    </div>
+    <nav class="stepper guide-only" id="stepper" aria-label="Lessons"></nav>
+  </header>
+
+  <main class="flex flex-col gap-6 pb-6">
+
+    <!-- ============ GUIDE VIEW ============ -->
+    <section id="guideView">
+      <div class="step">
+        <div class="step-head">
+          <div class="step-kick-row"><span class="eyebrow" id="guideKicker">Start here</span><span class="lock-badge" id="guideBadge" hidden></span></div>
+          <h2 class="step-title" id="guideTitle">How this course works</h2>
+          <p class="step-lede" id="guideLede"></p>
+          <div class="analogy" id="guideAnalogy" hidden></div>
+        </div>
+        <div class="experiment" id="guideExperiment" hidden>
+          <div class="ex-hd"><i data-lucide="flask-conical" class="w-4 h-4"></i><span>Try it</span><span class="ex-state" id="exState">not yet</span></div>
+          <p class="ex-prompt" id="exPrompt"></p>
+        </div>
+        <div class="step-visual" id="stepVisual"></div>
+        <div class="step-extras" id="stepExtras"></div>
+      </div>
+      <nav class="bottom-nav" id="bottomNav">
+        <button class="btn" id="prevBtn"><i data-lucide="arrow-left" class="w-4 h-4"></i>Back</button>
+        <div class="step-dots" id="stepDots"></div>
+        <button class="btn primary" id="nextBtn">Next<i data-lucide="arrow-right" class="w-4 h-4"></i></button>
+      </nav>
+    </section>
+
+    <!-- ============ EXPLORE VIEW ============ -->
+    <section id="exploreView" class="flex flex-col gap-6" hidden>
+
+    <!-- STATS -->
+    <section class="card panel reveal" id="panelStats">
+      <div class="card-bd">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div class="stat"><span class="k">Strategy</span><span class="v" id="statStrategy">ZeRO-2</span></div>
+          <div class="stat"><span class="k">GPUs</span><span class="v mono" id="statGpus">8</span></div>
+          <div class="stat"><span class="k">State / GPU</span><span class="v mono" id="statState">—</span></div>
+          <div class="stat"><span class="k">Comm / step</span><span class="v mono" id="statComm">—</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONFIG -->
+    <section class="card panel reveal" id="panelConfig">
+      <div class="card-hd">
+        <h3><i data-lucide="sliders-horizontal" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--weights)"></i>Configuration</h3>
+        <span class="chip"><span class="dot" style="color:var(--acts)"></span>live</span>
+      </div>
+      <div class="card-bd flex flex-wrap items-end gap-x-8 gap-y-5">
+
+        <div>
+          <div class="eyebrow mb-2">Strategy</div>
+          <div class="seg" data-seg="strategy" role="group">
+            <button data-val="dp" aria-pressed="false">DP</button>
+            <button data-val="z1" aria-pressed="false">ZeRO-1</button>
+            <button data-val="z2" aria-pressed="true">ZeRO-2</button>
+            <button data-val="z3" aria-pressed="false">ZeRO-3</button>
+            <button data-val="tp" aria-pressed="false">Tensor</button>
+            <button data-val="pp" aria-pressed="false">Pipeline</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="eyebrow mb-2">Nodes</div>
+          <div class="seg seg-soft" data-seg="nodes" role="group">
+            <button data-val="1" aria-pressed="true">1</button>
+            <button data-val="2" aria-pressed="false">2</button>
+            <button data-val="3" aria-pressed="false">3</button>
+            <button data-val="4" aria-pressed="false">4</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="eyebrow mb-2">GPUs / node</div>
+          <div class="seg seg-soft" data-seg="perNode" role="group">
+            <button data-val="2" aria-pressed="false">2</button>
+            <button data-val="4" aria-pressed="false">4</button>
+            <button data-val="8" aria-pressed="true">8</button>
+          </div>
+        </div>
+
+        <div style="min-width:190px">
+          <div class="flex items-center justify-between mb-2">
+            <span class="eyebrow">Model size</span><span class="mono text-[12px]"><span id="lblModel">7</span> <small style="color:var(--muted)">B</small></span>
+          </div>
+          <input type="range" min="1" max="70" step="1" value="7" id="inModel" class="w-full" style="accent-color:var(--weights)" />
+        </div>
+
+        <div class="adv-only" style="min-width:150px">
+          <div class="flex items-center justify-between mb-2">
+            <span class="eyebrow">Batch / GPU</span><span class="mono text-[12px]" id="lblBatch">1</span>
+          </div>
+          <input type="range" min="1" max="32" step="1" value="1" id="inBatch" class="w-full" style="accent-color:var(--weights)" />
+        </div>
+
+        <div class="adv-only" style="min-width:150px">
+          <div class="flex items-center justify-between mb-2">
+            <span class="eyebrow">Seq length</span><span class="mono text-[12px]" id="lblSeq">4096</span>
+          </div>
+          <input type="range" min="1024" max="32768" step="1024" value="4096" id="inSeq" class="w-full" style="accent-color:var(--weights)" />
+        </div>
+
+        <div>
+          <div class="eyebrow mb-2">VRAM / GPU</div>
+          <div class="seg seg-soft" data-seg="vram" role="group">
+            <button data-val="40" aria-pressed="false">40 GB</button>
+            <button data-val="80" aria-pressed="true">80 GB</button>
+            <button data-val="141" aria-pressed="false">141 GB</button>
+          </div>
+        </div>
+
+        <label class="adv-only flex items-center gap-3 cursor-pointer select-none" id="ckptLabel">
+          <span class="eyebrow">Activation checkpointing</span>
+          <input type="checkbox" id="inCkpt" class="sr-only" />
+          <span class="relative inline-flex w-11 h-6 rounded-full" id="ckptSwitch" style="background:var(--inset);border:1px solid var(--border-strong);transition:background var(--dur-2) var(--ease)">
+            <span class="absolute top-[3px] left-[3px] w-4 h-4 rounded-full" id="ckptKnob" style="background:var(--muted);transition:transform var(--dur-2) var(--ease),background var(--dur-2) var(--ease)"></span>
+          </span>
+        </label>
+
+      </div>
+    </section>
+
+    <!-- FEASIBILITY GRID -->
+    <section class="card panel reveal" id="panelFeas">
+      <div class="card-hd">
+        <h3><i data-lucide="grid-3x3" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--acts)"></i>Does it fit? (all strategies)</h3>
+        <span class="chip" id="feasChip">—</span>
+      </div>
+      <div class="card-bd">
+        <div class="feas-grid" id="feasBody"></div>
+      </div>
+    </section>
+
+    <!-- LOCK -->
+    <section class="card panel reveal" id="panelLock">
+      <div class="card-hd">
+        <h3><i data-lucide="lock" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--grads)"></i>Lock a setup</h3>
+        <span class="chip" id="lockChip">not locked</span>
+      </div>
+      <div class="card-bd">
+        <div class="lock-body" id="lockBody"></div>
+      </div>
+    </section>
+
+    <!-- WORKSPACE -->
+    <section class="grid-main">
+      <div class="flex flex-col gap-6">
+        <div class="card panel reveal" id="panelTopology">
+          <div class="card-hd">
+            <h3><i data-lucide="server" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--weights)"></i>GPU topology &amp; memory</h3>
+            <div class="flow-chip-wrap">
+              <span class="chip" id="flowChip">idle</span>
+              <span class="chip" id="topoChip">8 GPUs · 80 GB each</span>
+            </div>
+          </div>
+          <div class="card-bd">
+            <div class="xray-split">
+              <div class="xray-ring">
+                <div class="topo-stage" id="topoStage">
+                  <div id="topology"></div>
+                  <svg id="flowSvg" class="flow-svg" aria-hidden="true"></svg>
+                  <div class="stage-caption" id="stageCaption" aria-live="polite">
+                    <span class="sc-live"><span class="sc-dot"></span>Live</span>
+                    <span class="sc-chip chip" id="capPhase">idle</span>
+                    <span class="sc-text beat-in" id="capText">Press <b>Play</b> to run the timeline.</span>
+                  </div>
+                </div>
+              </div>
+              <div id="xrayHost"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card panel reveal xray-card" id="panelXray">
+          <div class="card-hd">
+            <h3><i data-lucide="microscope" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--opt)"></i>Inside one GPU</h3>
+            <span class="chip" id="xrayOwn">full replica</span>
+          </div>
+          <div class="card-bd">
+            <div id="xrayBody"></div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="card panel log reveal" id="panelLog">
+        <div class="card-hd">
+          <h3><i data-lucide="scroll-text" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--acts)"></i>Step explanation</h3>
+          <span class="chip" id="logChip">ZeRO-2</span>
+        </div>
+        <div class="log-body" id="logBody"></div>
+      </aside>
+    </section>
+
+    <!-- TRANSPORT -->
+    <section class="card panel reveal" id="panelTransport">
+      <div class="card-bd transport">
+        <div class="flex items-center gap-2">
+          <button class="btn icon primary tip" id="playBtn" data-tip="Play" aria-label="Play"><i data-lucide="play" class="w-4 h-4"></i></button>
+          <button class="btn icon tip" id="pauseBtn" data-tip="Pause" aria-label="Pause"><i data-lucide="pause" class="w-4 h-4"></i></button>
+          <button class="btn icon tip" id="stepBackBtn" data-tip="Step back" aria-label="Step back"><i data-lucide="skip-back" class="w-4 h-4"></i></button>
+          <button class="btn icon tip" id="stepFwdBtn" data-tip="Step forward" aria-label="Step forward"><i data-lucide="skip-forward" class="w-4 h-4"></i></button>
+          <button class="btn icon tip" id="resetBtn" data-tip="Reset" aria-label="Reset"><i data-lucide="rotate-ccw" class="w-4 h-4"></i></button>
+        </div>
+        <div class="progress"><i id="progressBar"></i></div>
+        <div class="phase-dots" id="phaseDots" aria-hidden="true"></div>
+        <div class="seg seg-soft" data-seg="speed" role="group" aria-label="Speed">
+          <button data-val="0.25" aria-pressed="false">0.25×</button>
+          <button data-val="0.5" aria-pressed="false">0.5×</button>
+          <button data-val="1" aria-pressed="true">1×</button>
+          <button data-val="2" aria-pressed="false">2×</button>
+        </div>
+        <span class="mono text-[11.5px]" style="color:var(--muted)" id="phaseLabel">idle</span>
+      </div>
+    </section>
+
+    <!-- REFERENCE -->
+    <details class="card panel reveal" id="reference">
+      <summary class="card-hd cursor-pointer list-none">
+        <h3><i data-lucide="line-chart" class="inline w-4 h-4 mr-1.5 -mt-0.5" style="color:var(--acts)"></i>Reference &amp; comparisons</h3>
+        <span class="flex items-center gap-3"><span class="chip">memory · communication · table</span><i data-lucide="chevron-down" class="w-4 h-4" style="color:var(--muted)"></i></span>
+      </summary>
+      <div class="card-bd flex flex-col gap-6">
+        <div class="grid-2">
+          <div>
+            <div class="eyebrow mb-3">Memory per GPU by strategy (GiB)</div>
+            <div class="chart-box"><canvas id="memChart"></canvas></div>
+            <div class="flex flex-wrap gap-4 mt-4">
+              <span class="chip weights"><span class="dot"></span>Weights</span>
+              <span class="chip grads"><span class="dot"></span>Gradients</span>
+              <span class="chip opt"><span class="dot"></span>Optimizer</span>
+              <span class="chip acts"><span class="dot"></span>Activations</span>
+              <span class="chip oom"><span class="dot"></span>Over limit</span>
+            </div>
+          </div>
+          <div>
+            <div class="eyebrow mb-3">Communication per step (GiB)</div>
+            <div class="chart-box"><canvas id="commChart"></canvas></div>
+            <p class="text-[11.5px] leading-relaxed mt-4 mb-0" style="color:var(--muted)">
+              <span class="mono" style="color:var(--text)">P</span> = params in bf16 = <span class="mono">2·N</span> bytes.
+              DP / ZeRO-1 / ZeRO-2 ≈ <span class="mono" style="color:var(--text)">2P</span>; ZeRO-3 ≈ <span class="mono" style="color:var(--text)">3P</span>.
+              Tensor &amp; Pipeline scale with activations.
+            </p>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="dt">
+            <thead><tr><th>Strategy</th><th>B / weight / GPU</th><th>State / GPU</th><th>Fits?</th><th>Comm / step</th><th>Topology</th><th>When to use</th></tr></thead>
+            <tbody id="cmpBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+    </section><!-- /exploreView -->
+
+  </main>
+
+  <footer class="pb-10">
+    <div class="card">
+      <div class="card-bd flex flex-wrap items-center justify-between gap-4">
+        <div class="flex flex-wrap gap-2">
+          <span class="chip weights"><span class="dot"></span>Weights 2 B</span>
+          <span class="chip grads"><span class="dot"></span>Gradients 2 B</span>
+          <span class="chip opt"><span class="dot"></span>Optimizer 12 B</span>
+          <span class="chip acts"><span class="dot"></span>Activations</span>
+        </div>
+        <p class="text-[11.5px] mono m-0" style="color:var(--muted)">16 B/weight · DP 16 · Z1 4+12/G · Z2 2+14/G · Z3 16/G</p>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+/* ============================================================
+   2. CONSTANTS
+   ============================================================ */
+const GiB = 1024 ** 3;
+const STRATEGY_LABELS = { dp:'Data Parallel', z1:'ZeRO-1', z2:'ZeRO-2', z3:'ZeRO-3', tp:'Tensor Parallel', pp:'Pipeline Parallel' };
+const LESSONS = [
+  { id:0, n:'00', label:'Terms' },          { id:1, n:'01', label:'Assumptions' },
+  { id:2, n:'02', label:'Data Parallel' },  { id:3, n:'03', label:'ZeRO-1' },
+  { id:4, n:'04', label:'ZeRO-2' },         { id:5, n:'05', label:'ZeRO-3' },
+  { id:6, n:'06', label:'Tensor Parallel' },{ id:7, n:'07', label:'Pipeline Parallel' },
+  { id:8, n:'08', label:'Playground' },     { id:9, n:'09', label:'Walkthrough' },
+];
+const PALETTE = ['#22d3ee','#f59e0b','#a78bfa','#34d399','#60a5fa','#f472b6','#facc15','#2dd4bf'];
+const MAX_RING_GPUS = 8;            /* max GPU icons drawn per node before abbreviating */
+const MAX_RING_NODES = 2;           /* max node circles drawn side by side */
+const NODE_ACCENT = ['#0891b2','#d97706'];   /* fixed ink accents on the white canvas */
+const STRATEGY_SHORT = { dp:'DP', z1:'ZeRO-1', z2:'ZeRO-2', z3:'ZeRO-3', tp:'Tensor', pp:'Pipeline' };
+const MODEL_PRESETS = [
+  { b:1, h:2048, l:22 }, { b:7, h:4096, l:32 }, { b:13, h:5120, l:40 },
+  { b:30, h:7168, l:60 }, { b:70, h:8192, l:80 },
+];
+const ACT_BYTES = { full:20, ckpt:2 };
+const MICROBATCHES = 8;
+
+const CONFIG = { strategy:'z2', nodes:1, perNode:8, nB:7, batch:1, seq:4096, vram:80, ckpt:false };
+
+/* ============================================================
+   2b. APP SHELL STATE — prefs, progress, guided steps
+   ============================================================ */
+const PANELS = {
+  stats:'panelStats', config:'panelConfig', topology:'panelTopology',
+  xray:'panelXray', log:'panelLog', transport:'panelTransport', reference:'reference',
+  lock:'panelLock', feas:'panelFeas',
+};
+let FOCUS_GPU = 0;                // which GPU the X-ray magnifies (global index)
+const PANEL_HOMES = new Map();          // id -> { parent, next } captured at init
+
+const PREFS = {
+  showMath:false, showDeepDive:false, glossary:true,
+  advancedConfig:false, autoplay:true, reducedMotion:false, theme:'dark',
+};
+const PREF_META = [
+  ['showMath','Show math derivations'],
+  ['showDeepDive','Show deep-dives'],
+  ['glossary','Glossary tooltips'],
+  ['advancedConfig','Show advanced config'],
+  ['autoplay','Autoplay animations'],
+  ['reducedMotion','Reduced motion'],
+];
+const PROGRESS = { view:'guide', step:0, completed:[] };
+const APP_VERSION = 'phase-c';    // bump to invalidate saved step index on content restructure
+let LOCKED = null;                // locked setup from the Playground (drives Walkthrough)
+
+const STEPS = [
+  /* ================= INTRO ================= */
+  { id:'welcome', lesson:null, kind:'intro', kicker:'Start here', title:'How this course works',
+    lede:'A guided tour of how large models get trained across many GPUs. You will see <b>one idea at a time</b> — read a little, watch a tuned animation, then move on. Use <b>Next / Back</b> (or the ← / → keys). Prefer to poke around freely? Hit <b>Explore</b> any time.',
+    panels:['stats'], layout:[['stats']],
+    takeaway:['One idea per screen','Animations you control','Toggle depth in Options'] },
+
+  /* ================= TERMS ================= */
+  { id:'t-memory', lesson:0, kind:'concept', kicker:'Terms · memory', title:'Training memory has four parts',
+    lede:'Every GPU in training holds four kinds of tensor: <span class="term tip" data-tip="Model parameters, stored in bf16.">weights</span>, <span class="term tip" data-tip="One gradient per parameter, also bf16.">gradients</span>, <span class="term tip" data-tip="Adam keeps a fp32 master copy plus momentum m and velocity v.">optimizer state</span>, and <span class="term tip" data-tip="Intermediate tensors kept for the backward pass.">activations</span>. The optimizer is the giant — it alone is <b>12 of the 16 bytes</b> per weight.',
+    panels:['stats','xray'], layout:[['stats'],['xray']],
+    math:'weights bf16 = 2 B<br>gradients bf16 = 2 B<br>master fp32 = 4 B<br>Adam m, v (fp32) = 4 + 4 B<br><span style="color:var(--weights)">─────</span><br><b>16 B / weight</b>' },
+
+  { id:'t-share', lesson:0, kind:'concept', kicker:'Terms · the two verbs', title:'Replicate, or shard',
+    lede:'Only two things can happen to a tensor. It can be <b>replicated</b> — a full copy on every GPU — or <b>sharded</b> — each GPU keeps just <b>1/G</b> of it. Every strategy ahead is just a choice of which tensors to shard. The X-ray badges say which: <span class="chip weights">Replica ×8</span> or <span class="chip grads">Shard 3/8</span>.',
+    panels:['stats','xray'], layout:[['stats'],['xray']] },
+
+  { id:'t-wall', lesson:0, kind:'experiment', kicker:'Terms · the problem', title:'The memory wall',
+    lede:'With nothing sharded, a single GPU must hold the <b>whole</b> training state. Drag <b>Model size</b> up and watch the moment one 80 GB GPU runs out of room.',
+    panels:['stats','xray','config'], layout:[['stats'],['xray'],['config']],
+    experiment:{ prompt:'Drag <b>Model size</b> up until the strategy shows <b style="color:var(--oom)">OOM</b>.', cfg:{strategy:'dp', nodes:1, perNode:8, nB:1}, goal:(c,r)=>!r.fits } },
+
+  { id:'t-why', lesson:0, kind:'takeaway', kicker:'Terms · the fix', title:'So we spread the work out',
+    lede:'No single GPU fits a frontier model, so we split the state across many GPUs. Every split buys memory and costs <b>communication</b>. The whole course is that trade.',
+    panels:['stats'], layout:[['stats']],
+    takeaway:['Memory is the problem','Splitting costs communication','Pick where you sit'] },
+
+  /* ================= ASSUMPTIONS ================= */
+  { id:'a-rules', lesson:1, kind:'concept', kicker:'Assumptions', title:'The ground rules',
+    lede:'To keep the arithmetic honest we fix a few things for the whole course. A <b>node</b> is 8 GPUs joined by fast <b>NVLink</b>; nodes talk over slower <b>InfiniBand</b>. Parameters and gradients are <b>bf16</b>, the optimizer is <b>fp32</b>. We count <b>memory</b> and <b>bytes moved</b> and ignore compute time. Activation checkpointing is off unless you switch it on.',
+    panels:['stats'], layout:[['stats']] },
+
+  { id:'a-letters', lesson:1, kind:'concept', kicker:'Assumptions · notation', title:'A tiny alphabet',
+    lede:'We use just a few symbols. <b class="mono">N</b> = number of parameters (a 7B model has N = 7×10⁹). <b class="mono">P</b> = those parameters in bf16 = <b class="mono">2N bytes</b>. <b class="mono">G</b> = number of GPUs. Communication is always reported <b>in P</b>: “2P per step” means moving two copies of the weights, every step.',
+    panels:['stats'], layout:[['stats']],
+    math:'N = parameters<br>P = 2·N bytes (bf16)<br>G = number of GPUs<br>comm reported in multiples of P' },
+
+  /* ================= DATA PARALLEL ================= */
+  { id:'dp-concept', lesson:2, kind:'concept', kicker:'Lesson · Data Parallel', title:'The simplest idea: copy everything',
+    lede:'<b>Data Parallelism</b> keeps a full replica of the model on every GPU. Each GPU trains on a different batch, then the gradients are <b>averaged</b> so the replicas never drift apart. Watch the tuned loop — the amber packets are gradients on the move.',
+    preset:{strategy:'dp', nodes:1, perNode:8, nB:7},
+    panels:['topology','xray','log','transport'], stage:true },
+
+  { id:'dp-lab', lesson:2, kind:'experiment', kicker:'Lesson · Data Parallel', title:'Run a gradient All-Reduce',
+    lede:'Press <b>Play</b> to run the DP loop. During <b>All-Reduce</b> every GPU swaps gradient chunks with its neighbour until all hold the same average. Then add nodes and watch traffic cross InfiniBand.',
+    experiment:{ prompt:'Run the <b>All-Reduce</b>, then switch to <b>2 nodes</b> and run it again.', cfg:{strategy:'dp', nodes:1, perNode:8} },
+    takeaway:['Memory unchanged vs 1 GPU','All-reduce = 2P per step','Speed via more replicas'],
+    panels:['topology','xray','log','transport'], stage:true },
+
+  /* ================= ZERO-1 ================= */
+  { id:'z1-concept', lesson:3, kind:'concept', kicker:'Lesson · ZeRO-1', title:'Shard the optimizer state',
+    lede:'The optimizer is <b>12 of the 16</b> bytes per weight — by far the best thing to cut. <b>ZeRO-1</b> shards only it: each GPU keeps and updates <b>1/G</b> of the master weights, Adam m and v. Weights and gradients stay fully replicated.',
+    preset:{strategy:'z1', nodes:1, perNode:8, nB:13},
+    panels:['topology','xray','log','transport'], stage:true },
+
+  { id:'z1-lab', lesson:3, kind:'experiment', kicker:'Lesson · ZeRO-1', title:'Reduce-Scatter, then All-Gather',
+    lede:'Run the loop: gradients are reduced <i>and split</i> (each GPU keeps 1/G), the optimizer updates only its shard, then updated weights are gathered back so the replicas match again. Total traffic is still about <b>2P</b>.',
+    experiment:{ prompt:'At 13B, DP is <b style="color:var(--oom)">OOM</b>. Switch to <b>ZeRO-1</b> and make it fit.', cfg:{strategy:'dp', nodes:1, perNode:8, nB:13}, goal:(c,r)=>c.strategy==='z1' && r.fits },
+    takeaway:['Optimizer sharded 1/G','Weights & grads replicated','Still ≈ 2P per step'],
+    panels:['topology','xray','log','transport'], stage:true },
+
+  /* ================= ZERO-2 ================= */
+  { id:'z2-concept', lesson:4, kind:'concept', kicker:'Lesson · ZeRO-2', title:'Shard the gradients too',
+    lede:'<b>ZeRO-2</b> additionally shards the gradients. After the backward pass they are reduced and each GPU keeps only its <b>1/G</b> slice instead of a full copy. Memory drops again; communication stays near <b>2P</b>.',
+    preset:{strategy:'z2', nodes:1, perNode:8, nB:13},
+    panels:['topology','xray','log','transport'], stage:true },
+
+  { id:'z2-lab', lesson:4, kind:'experiment', kicker:'Lesson · ZeRO-2', title:'Compare with ZeRO-1',
+    lede:'Flip between <b>ZeRO-1</b> and <b>ZeRO-2</b> and watch the X-ray: ZeRO-2 keeps gradients sharded, so the amber bar shrinks by G×. Pick ZeRO-2.',
+    experiment:{ prompt:'Toggle <b>ZeRO-1</b> / <b>ZeRO-2</b> and compare <b>State / GPU</b>.', cfg:{strategy:'z1', nodes:1, perNode:8, nB:13}, goal:(c)=>c.strategy==='z2' },
+    takeaway:['Gradients sharded 1/G','Weights still replicated','Memory ↓, comm unchanged'],
+    panels:['topology','xray','log','transport'], stage:true },
+
+  /* ================= ZERO-3 ================= */
+  { id:'z3-concept', lesson:5, kind:'concept', kicker:'Lesson · ZeRO-3', title:'Shard the weights as well',
+    lede:'<b>ZeRO-3</b> shards everything, including the weights. Each GPU permanently owns <b>1/G</b> of the model and gathers a layer\u2019s weights on demand, then frees them. Memory is minimised; traffic rises to about <b>3P</b> because weights are gathered in both the forward and backward passes.',
+    preset:{strategy:'z3', nodes:1, perNode:8, nB:30},
+    panels:['topology','xray','log','transport'], stage:true },
+
+  { id:'z3-lab', lesson:5, kind:'experiment', kicker:'Lesson · ZeRO-3', title:'Gather layers on demand',
+    lede:'Run the loop and watch the cyan weight bar bump up by one layer during each gather, then fall back. Compare the memory with ZeRO-2 at 30B.',
+    experiment:{ prompt:'Compare <b>ZeRO-2</b> vs <b>ZeRO-3</b> memory and comm at <b>30B</b>.', cfg:{strategy:'z2', nodes:1, perNode:8, nB:30}, goal:(c,r)=>c.strategy==='z3' && r.fits },
+    takeaway:['Everything sharded 1/G','Gather-on-demand layers','Comm rises to ≈ 3P'],
+    panels:['topology','xray','log','transport'], stage:true },
+
+  /* ================= TENSOR PARALLEL ================= */
+  { id:'tp-concept', lesson:6, kind:'concept', kicker:'Lesson · Tensor Parallel', title:'Split one layer across GPUs',
+    lede:'Where ZeRO shards whole tensors, <b>Tensor Parallelism</b> splits the <b>matrices inside each layer</b> — some columns here, some rows there. It needs a very fast link, so it lives <b>inside a node</b> over NVLink.',
+    preset:{strategy:'tp', nodes:1, perNode:8, nB:13},
+    panels:['topology','xray','log','transport'], stage:true },
+
+  { id:'tp-lab', lesson:6, kind:'experiment', kicker:'Lesson · Tensor Parallel', title:'Two All-Reduces per layer',
+    lede:'Each layer needs two all-reduces on its activations (one in the forward pass, one in the backward). Watch the packets stay <b>inside the node</b> — that is why TP is cheap on NVLink and terrible over Ethernet.',
+    experiment:{ prompt:'Run the <b>Tensor</b> loop — no packet should cross to another node.', cfg:{strategy:'tp', nodes:1, perNode:8} },
+    takeaway:['Splits matrices, not whole tensors','2 all-reduces per layer','Intra-node (NVLink) only'],
+    panels:['topology','xray','log','transport'], stage:true },
+
+  /* ================= PIPELINE PARALLEL ================= */
+  { id:'pp-concept', lesson:7, kind:'concept', kicker:'Lesson · Pipeline Parallel', title:'Give each stage some layers',
+    lede:'<b>Pipeline Parallelism</b> gives each GPU a contiguous <b>range of layers</b> — a stage. Activations flow stage → stage as a send/receive. No weight communication is needed at all, but stages sit idle while they wait, creating a <b>bubble</b>.',
+    preset:{strategy:'pp', nodes:2, perNode:8, nB:13},
+    panels:['topology','xray','log','transport'], stage:true },
+
+  { id:'pp-lab', lesson:7, kind:'experiment', kicker:'Lesson · Pipeline Parallel', title:'Microbatches fill the pipe',
+    lede:'Microbatches keep every stage busy most of the time. The idle fraction — the bubble — is roughly (pp−1)/(pp−1+microbatches). Watch the chain of sends wind forward, then backward.',
+    experiment:{ prompt:'Play the loop, then raise <b>nodes</b> to see the bubble grow.', cfg:{strategy:'pp', nodes:2, perNode:8}, goal:(c)=>c.strategy==='pp' },
+    takeaway:['Each stage owns layers','Only activations cross stages','Bubble = idle waiting'],
+    panels:['topology','xray','log','transport'], stage:true },
+
+  /* ================= PLAYGROUND ================= */
+  { id:'playground', lesson:8, kind:'experiment', kicker:'Playground', title:'Build your own setup',
+    lede:'Your turn. Choose a <b>strategy</b>, a <b>topology</b> (nodes × GPUs/node), a <b>model size</b> and a <b>VRAM</b> budget. The grid updates live: green fits, red is <b style="color:var(--oom)">OOM</b>. Click a row to switch strategy, then <b>Lock</b> the setup you like.',
+    panels:['stats','config','lock','feas','topology','xray','transport'],
+    layout:[['stats'],['lock','feas'],['config'],['topology','xray'],['transport']],
+    experiment:{ prompt:'Find a setup that <b>fits</b>, then <b>Lock</b> it for the Walkthrough.', cfg:{strategy:'z2', nodes:1, perNode:8, nB:7} } },
+
+  { id:'decision', lesson:8, kind:'concept', kicker:'Playground · the decision', title:'A practical decision',
+    lede:'A short decision tree. Model fits: <b>DP</b>. Optimizer state will not fit: <b>ZeRO-1</b>. Gradients too: <b>ZeRO-2</b>. Whole model too big: <b>ZeRO-3</b>. A single layer too big: <b>Tensor</b> (intra-node). Too many layers for one node: <b>Pipeline</b>. Real systems <b>combine</b> them (3D parallelism).',
+    panels:['topology','xray','reference'], layout:[['topology'],['xray'],['reference']],
+    takeaway:['Cheapest fix first','Match topology to the link','Combine when needed'] },
+
+  /* ================= WALKTHROUGH ================= */
+  { id:'walkthrough', lesson:9, kind:'experiment', kicker:'Walkthrough', title:'Run your locked setup',
+    lede:'This runs the exact setup you <b>locked</b> in the Playground, through <b>two full training iterations</b>. Not locked anything yet? Lock the current configuration below and press <b>Play</b>.',
+    walkthrough:true,
+    experiment:{ prompt:'Play the full loop, then <b>Unlock</b> and change the setup in the Playground.', cfg:{strategy:'z2', nodes:1, perNode:8, nB:7} },
+    panels:['stats','lock','topology','xray','log','transport'], stage:true },
+
+  { id:'recap', lesson:9, kind:'recap', kicker:'Recap', title:'You have seen the whole picture',
+    lede:'You can now name the four kinds of memory, explain 16 B/weight, and say what each strategy shards and what it costs in communication. Ready to poke at the numbers yourself? Open <b>Explore</b> from the top bar.',
+    panels:['stats'], layout:[['stats']],
+    takeaway:['16 B / weight','DP → Z1 → Z2 → Z3 shard more','TP splits layers, PP splits stages'] },
+];
+
+/* ============================================================
+   3. MATH ENGINE  (see DASHBOARD_PLAN.md §6)
+   ============================================================ */
+function deriveShape(nB){
+  const P = MODEL_PRESETS;
+  if(nB <= P[0].b) return { h:P[0].h, l:P[0].l };
+  if(nB >= P[P.length-1].b) return { h:P[P.length-1].h, l:P[P.length-1].l };
+  for(let i=0;i<P.length-1;i++){
+    if(nB >= P[i].b && nB <= P[i+1].b){
+      const t = (nB - P[i].b) / (P[i+1].b - P[i].b);
+      return { h:Math.round(P[i].h + t*(P[i+1].h - P[i].h)), l:Math.round(P[i].l + t*(P[i+1].l - P[i].l)) };
+    }
+  }
+}
+function degrees(c){
+  const G = c.nodes * c.perNode;
+  let tp = 1, pp = 1;
+  if(c.strategy === 'tp') tp = Math.min(G, c.perNode);
+  if(c.strategy === 'pp') pp = G;
+  return { G, tp, pp };
+}
+function stateBytes(c){
+  const N = c.nB * 1e9, { G, tp, pp } = degrees(c);
+  switch(c.strategy){
+    case 'dp': return { w:2*N,     g:2*N,     opt:12*N     };
+    case 'z1': return { w:2*N,     g:2*N,     opt:12*N/G   };
+    case 'z2': return { w:2*N,     g:2*N/G,   opt:12*N/G   };
+    case 'z3': return { w:2*N/G,   g:2*N/G,   opt:12*N/G   };
+    case 'tp': return { w:2*N/tp,  g:2*N/tp,  opt:12*N/tp  };
+    case 'pp': return { w:2*N/pp,  g:2*N/pp,  opt:12*N/pp  };
+  }
+}
+function actBytes(c){
+  const { h, l } = deriveShape(c.nB);
+  const { pp } = degrees(c);
+  const A = c.ckpt ? ACT_BYTES.ckpt : ACT_BYTES.full;
+  let layersHere = l, micro = 1;
+  if(c.strategy === 'pp'){ layersHere = l / pp; micro = MICROBATCHES; }
+  return c.batch * c.seq * h * A * layersHere * micro;
+}
+function commBytes(c){
+  const N = c.nB * 1e9, P = 2*N, { G, tp, pp } = degrees(c);
+  const { h, l } = deriveShape(c.nB);
+  const actTensor = c.batch * c.seq * h * 2;
+  switch(c.strategy){
+    case 'dp': case 'z1': case 'z2': return { bytes:2*P, mult:'2P' };
+    case 'z3': return { bytes:3*P, mult:'3P' };
+    case 'tp': return { bytes:l * 4 * actTensor, mult:`${l}×2 AR/layer` };
+    case 'pp': return { bytes:(pp-1) * 2 * MICROBATCHES * actTensor, mult:'send/recv' };
+  }
+}
+function bubbleFraction(c){
+  const { pp } = degrees(c);
+  return (pp - 1) / (pp - 1 + MICROBATCHES);
+}
+function evaluate(c){
+  const state = stateBytes(c);
+  const act = actBytes(c);
+  const stateTotal = state.w + state.g + state.opt;
+  const perGpu = stateTotal + act;
+  const limit = c.vram * 1e9;
+  const comm = commBytes(c);
+  return { state, act, stateTotal, perGpu, limit, fits: perGpu <= limit, comm, degrees: degrees(c) };
+}
+
+/* ============================================================
+   4. FORMAT HELPERS
+   ============================================================ */
+const fmtGiB = (bytes, d=1) => (bytes / GiB).toFixed(d);
+const fmtBytes = (bytes) => bytes / GiB >= 100 ? fmtGiB(bytes,0) : fmtGiB(bytes,1);
+
+/* ============================================================
+   5. RENDERERS
+   ============================================================ */
+function ownershipLabel(i, c){
+  const { G, tp, pp } = degrees(c);
+  switch(c.strategy){
+    case 'dp': return 'full replica';
+    case 'z1': return `opt shard ${i}/${G}`;
+    case 'z2': return `grad+opt shard ${i}/${G}`;
+    case 'z3': return `shard ${i}/${G}`;
+    case 'tp': return `col shard ${i%tp}/${tp}`;
+    case 'pp': return `stage ${i}/${pp}`;
+  }
+}
+/* GPU glyph — a small board with fans, drawn in the node's ink accent */
+function gpuIconSvg(col){
+  return `<svg viewBox="0 0 40 40" fill="none" aria-hidden="true">
+    <rect x="5" y="7.5" width="30" height="21" rx="3.2" fill="#ffffff" stroke="${col}" stroke-width="1.7"/>
+    <rect x="5" y="7.5" width="30" height="6" rx="3.2" fill="${col}" opacity=".14"/>
+    <circle cx="14" cy="21.5" r="6.2" fill="#f1f5f9" stroke="${col}" stroke-width="1.3"/>
+    <circle cx="14" cy="21.5" r="1.8" fill="${col}"/>
+    <path d="M14 15.3v3.4M20.2 21.5h-3.4M14 27.7v-3.4M7.8 21.5h3.4" stroke="${col}" stroke-width="1.1" opacity=".7"/>
+    <circle cx="28.5" cy="21.5" r="4.2" fill="#f1f5f9" stroke="${col}" stroke-width="1.2"/>
+    <rect x="9" y="29.5" width="22" height="3.2" rx="1.2" fill="${col}" opacity=".85"/>
+  </svg>`;
+}
+function miniBarHtml(r){
+  const denom = Math.max(r.limit, r.perGpu) || 1;
+  const p = v => (Math.min(v/denom,1)*100).toFixed(1);
+  return `<div class="mini-bar">
+    <span style="width:${p(r.state.w)}%;background:#06b6d4"></span>
+    <span style="width:${p(r.state.g)}%;background:#f59e0b"></span>
+    <span style="width:${p(r.state.opt)}%;background:#8b5cf6"></span>
+    <span style="width:${p(r.act)}%;background:#10b981"></span>
+  </div>`;
+}
+function ringGpuHtml(globalIdx, j, c, r, col, pos){
+  const oob = !r.fits, blur = (c.perNode > MAX_RING_GPUS && j >= MAX_RING_GPUS-1);
+  const tip = `GPU ${globalIdx} · ${ownershipLabel(globalIdx, c)} · ${fmtBytes(r.perGpu)} / ${c.vram} GiB`;
+  return `<div class="gpu ${oob?'oob':''} ${blur?'blur':''}" data-gpu="${globalIdx}" style="${pos}" title="${tip}">
+    <div class="chip">${gpuIconSvg(col)}</div>
+    <div class="gid mono">G${j}</div>
+    ${miniBarHtml(r)}
+  </div>`;
+}
+/* positions `slots` items equally around a circle; returns inline style for the i-th */
+function ringPos(i, slots){
+  const ang = -Math.PI/2 + i * 2*Math.PI/slots;
+  const x = 50 + 39*Math.cos(ang);
+  const y = 50 + 39*Math.sin(ang);
+  return `left:${x.toFixed(2)}%;top:${y.toFixed(2)}%;transform:translate(-50%,-50%)`;
+}
+function renderTopology(c){
+  const host = document.getElementById('topology');
+  host.innerHTML = '';
+  const r = evaluate(c);
+  const nodesShown = Math.min(c.nodes, MAX_RING_NODES);
+  const wrap = document.createElement('div'); wrap.className = 'ring-wrap';
+
+  for(let n=0; n<nodesShown; n++){
+    const col = NODE_ACCENT[n % NODE_ACCENT.length];
+    const slots = Math.min(c.perNode, MAX_RING_GPUS);
+    const realCount = c.perNode > MAX_RING_GPUS ? slots - 1 : slots;   /* last slot becomes "+N" */
+    const tail = c.perNode - realCount;                                 /* how many hidden (plus the blurred one) */
+
+    const nodeEl = document.createElement('div');
+    nodeEl.className = 'ring-node' + (n===1 ? ' n1' : '');
+    let inner = '';
+    for(let j=0; j<realCount; j++){
+      inner += ringGpuHtml(n*c.perNode + j, j, c, r, col, ringPos(j, slots));
+    }
+    if(tail > 0){
+      inner += `<div class="gpu-tail" style="${ringPos(realCount, slots)}">
+        <span class="plus">+${tail}</span><span class="tlab">more</span></div>`;
+    }
+    inner += `<div class="node-label">
+        <div class="nl-name">Node ${n}</div>
+        <div class="nl-sub">${c.perNode} GPUs · ${fmtBytes(r.perGpu)} used</div>
+        <div class="nl-badge">NVLink domain</div>
+      </div>`;
+    nodeEl.innerHTML = inner;
+    wrap.appendChild(nodeEl);
+
+    if(n < nodesShown-1){
+      const br = document.createElement('div'); br.className = 'ring-bridge';
+      br.innerHTML = `<i data-lucide="arrow-left-right" class="w-4 h-4"></i><span class="line"></span><span class="lbl">InfiniBand</span>`;
+      wrap.appendChild(br);
+    }
+  }
+
+  if(c.nodes > MAX_RING_NODES){
+    const ghost = document.createElement('div'); ghost.className = 'ring-ghost';
+    ghost.innerHTML = `<span class="gt">+${c.nodes - MAX_RING_NODES} more nodes</span>`;
+    wrap.appendChild(ghost);
+  }
+
+  host.appendChild(wrap);
+
+  const capped = (c.perNode > MAX_RING_GPUS) || (c.nodes > MAX_RING_NODES);
+  if(capped){
+    const note = document.createElement('div'); note.className = 'ring-note';
+    const bits = [];
+    if(c.perNode > MAX_RING_GPUS) bits.push(`showing ${MAX_RING_GPUS-1} of ${c.perNode} GPUs/node`);
+    if(c.nodes > MAX_RING_NODES) bits.push(`showing ${MAX_RING_NODES} of ${c.nodes} nodes`);
+    note.textContent = bits.join(' · ');
+    host.appendChild(note);
+  }
+
+  document.getElementById('topoChip').textContent = `${r.degrees.G} GPUs · ${c.vram} GB each`;
+  document.getElementById('statGpus').textContent = r.degrees.G;
+
+  /* selection: keep the focus GPU on a slot that is actually drawn */
+  const drawn = [...host.querySelectorAll('.gpu')].map(el=>+el.dataset.gpu);
+  if(!drawn.includes(FOCUS_GPU)) FOCUS_GPU = drawn[0] || 0;
+  const selEl = host.querySelector(`.gpu[data-gpu="${FOCUS_GPU}"]`);
+  if(selEl) selEl.classList.add('sel');
+}
+
+/* ============================================================
+   GPU X-RAY — one magnified GPU, live replicated/sharded breakdown
+   ============================================================ */
+const XRAY_SEGS = [
+  { k:'master', label:'Master (fp32)',    color:'#0891b2' },
+  { k:'w',      label:'Weights (bf16)',   color:'#06b6d4' },
+  { k:'g',      label:'Gradients (bf16)', color:'#f59e0b' },
+  { k:'m',      label:'Adam m (fp32)',    color:'#a78bfa' },
+  { k:'v',      label:'Adam v (fp32)',    color:'#7c3aed' },
+  { k:'acts',   label:'Activations',      color:'#10b981' },
+];
+let XRAY = [];                 /* per-phase snapshots, aligned to PHASES */
+let XRAY_ELS = { segs:{}, items:{}, lim:null, total:null };
+
+/* Training-loop structure (Phase B): after which base phase (by index) the
+   "reveal — what is shared?" pause is inserted, per strategy. */
+const REVEAL_AFTER = { dp:1, z1:1, z2:1, z3:2, tp:3, pp:2 };
+const LOOP_ITERS = 2;
+
+/* which components are replicated vs this GPU's shard (the badges) */
+function xrayBadges(c, i){
+  const { G, tp, pp } = degrees(c);
+  const replica = `Replica ×${G}`;
+  const shard   = `Shard ${i}/${G}`;
+  const b = { acts:'Local' };
+  const tpB = `Shard ${i%tp}/${tp}`;
+  const ppB = `Shard ${i}/${pp}`;
+  const all = ['master','w','g','m','v'];
+  switch(c.strategy){
+    case 'dp':  all.forEach(k=>b[k]=replica); break;
+    case 'z1':  b.w = replica; b.g = replica; ['master','m','v'].forEach(k=>b[k]=shard); break;
+    case 'z2':  b.w = replica; ['master','g','m','v'].forEach(k=>b[k]=shard); break;
+    case 'z3':  all.forEach(k=>b[k]=shard); break;
+    case 'tp':  all.forEach(k=>b[k]=tpB); break;
+    case 'pp':  all.forEach(k=>b[k]=ppB); break;
+  }
+  return b;
+}
+/* steady-state per-GPU bytes for each segment (optimizer split into master/m/v) */
+function xrayBase(c){
+  const st = stateBytes(c);
+  const third = st.opt / 3;
+  return { master:third, w:st.w, g:st.g, m:third, v:third, acts:actBytes(c) };
+}
+/* per-phase snapshots (state at the END of each phase) → drives the live morph.
+   `__active` lists segments to emphasise while that phase runs. */
+function xraySeq(c){
+  const b = xrayBase(c);
+  const N = c.nB * 1e9, { G } = degrees(c);
+  const L = deriveShape(c.nB).l;
+  const layerW = 2 * N / L;                    /* one layer's weights, bf16 */
+  const mk = (vals, active) => Object.assign({}, vals, { __active: active });
+  const seq = {
+    dp: [
+      mk(b, ['acts']),
+      mk(b, ['g']),
+      mk(b, ['g']),
+      mk(b, ['master','m','v']),
+    ],
+    z1: [
+      mk(b, ['acts']),
+      mk(Object.assign({}, b, { g: 2*N }),   ['g']),
+      mk(Object.assign({}, b, { g: 2*N/G }), ['g']),
+      mk(Object.assign({}, b, { g: 0 }),     ['master','m','v','w']),
+      mk(Object.assign({}, b, { g: 0 }),     ['w']),
+    ],
+    z2: [
+      mk(b, ['acts']),
+      mk(Object.assign({}, b, { g: 2*N }),   ['g']),
+      mk(b, ['g']),
+      mk(b, ['master','m','v','w']),
+      mk(b, ['w']),
+    ],
+    z3: [
+      mk(Object.assign({}, b, { w: b.w + layerW }),               ['w']),
+      mk(b, ['acts']),
+      mk(Object.assign({}, b, { w: b.w + layerW, g: 2*N }),       ['w']),
+      mk(Object.assign({}, b, { g: 2*N/G }),                      ['g']),
+      mk(b, ['master','m','v','w']),
+    ],
+    tp: [
+      mk(b, ['acts','w']),
+      mk(b, ['acts']),
+      mk(b, ['acts','w']),
+      mk(b, ['g','acts']),
+    ],
+    pp: [
+      mk(b, ['acts']),
+      mk(b, ['acts']),
+      mk(b, ['g']),
+      mk(b, ['master','m','v']),
+    ],
+  };
+  const one = (seq[c.strategy] || [mk(b, [])]).slice();
+  /* insert the reveal snapshot (state frozen at the preceding phase) */
+  const ra = REVEAL_AFTER[c.strategy] ?? (one.length - 1);
+  const at = Math.min(one.length, ra + 1);
+  const prev = one[Math.max(0, ra)] || mk(b, []);
+  const revealSnap = mk({ master:prev.master, w:prev.w, g:prev.g, m:prev.m, v:prev.v, acts:prev.acts }, XRAY_SEGS.map(s=>s.k));
+  revealSnap.__reveal = true;
+  const iter = [...one.slice(0, at), revealSnap, ...one.slice(at)];
+  /* two identical iterations, then a terminal completed snapshot */
+  const comp = Object.assign({}, iter[iter.length-1], { __active:[], __complete:true });
+  return [...iter, ...iter.map(s=>Object.assign({}, s)), comp];
+}
+/* interpolate a snapshot between phase k-1 and k by t (t: 0..1) */
+function xrayAt(k, t){
+  const cur = XRAY[k], prev = XRAY[k-1] || cur;
+  if(!cur) return null;
+  const tt = Math.max(0, Math.min(1, t));
+  const out = { __active: cur.__active };
+  for(const s of XRAY_SEGS){
+    const a = prev[s.k] || 0, z = cur[s.k] || 0;
+    out[s.k] = a + (z - a) * tt;
+  }
+  return out;
+}
+
+function renderXray(c){
+  XRAY = xraySeq(c);
+  const host = document.getElementById('xrayBody');
+  if(!host) return;
+
+  const { G, tp, pp } = degrees(c);
+  const i = FOCUS_GPU;
+  const node = Math.floor(i / Math.max(1, c.perNode));
+  const col = NODE_ACCENT[node % NODE_ACCENT.length];
+  const badges = xrayBadges(c, i);
+  const r = evaluate(c);
+  const base = xrayBase(c);
+
+  /* denominator: fit the largest transient total so bars never blow out */
+  let maxSum = 0;
+  XRAY.forEach(sn => maxSum = Math.max(maxSum, XRAY_SEGS.reduce((t,s)=> t + (sn[s.k]||0), 0)));
+  const denom = Math.max(r.limit, maxSum) || 1;
+  const pct = v => Math.max(0, Math.min(100, (v / denom) * 100));
+
+  const list = XRAY_SEGS.map(s=>`
+    <div class="xray-item" data-seg="${s.k}">
+      <span class="dotc" style="background:${s.color}"></span>
+      <span class="lb">${s.label}</span>
+      <span class="chip ${s.k==='acts'?'acts':''}">${badges[s.k]}</span>
+      <span class="val" data-val="${s.k}">—</span>
+    </div>`).join('');
+
+  host.innerHTML = `
+    <div class="xray">
+      <div class="xray-head">
+        <div class="xray-gpu">${gpuIconSvg(col)}</div>
+        <div class="xray-id">
+          <div class="xray-name">GPU ${i}</div>
+          <div class="xray-sub">Node ${node} · ${ownershipLabel(i, c)}</div>
+        </div>
+      </div>
+      <div class="xray-bar" id="xrayBar">
+        ${XRAY_SEGS.map(s=>`<div class="xray-seg" data-seg="${s.k}" style="width:${pct(base[s.k])}%;background:${s.color}"></div>`).join('')}
+        <div class="xray-limit" id="xrayLimit" style="left:${pct(r.limit)}%"></div>
+      </div>
+      <div class="xray-scale"><span>0</span><span id="xrayTotal">—</span><span>${c.vram} GB VRAM</span></div>
+      <div class="xray-list">${list}</div>
+      <div class="xray-legend">
+        <span><b>×N</b> = copy on every GPU</span>
+        <span><b>k/N</b> = this GPU's shard</span>
+        <span><b>Local</b> = not shared</span>
+      </div>
+    </div>`;
+
+  XRAY_ELS.segs = {}; XRAY_ELS.items = {};
+  host.querySelectorAll('.xray-seg').forEach(el=>XRAY_ELS.segs[el.dataset.seg] = el);
+  host.querySelectorAll('.xray-item').forEach(el=>XRAY_ELS.items[el.dataset.seg] = el);
+  XRAY_ELS.lim = document.getElementById('xrayLimit');
+  XRAY_ELS.total = document.getElementById('xrayTotal');
+  XRAY_ELS.denom = denom;
+  XRAY_ELS.limit = r.limit;
+
+  const own = document.getElementById('xrayOwn');
+  if(own) own.textContent = ownershipLabel(i, c);
+
+  updateXray(anim.index, anim.t);
+}
+
+function updateXray(k, t){
+  const snap = xrayAt(k, t);
+  if(!snap || !XRAY_ELS.denom) return;
+  const denom = XRAY_ELS.denom;
+  const active = snap.__active || [];
+  const pct = v => Math.max(0, Math.min(100, (v / denom) * 100));
+  let total = 0;
+  for(const s of XRAY_SEGS){
+    const v = snap[s.k] || 0; total += v;
+    const on = active.includes(s.k);
+    const el = XRAY_ELS.segs[s.k];
+    if(el){ el.style.width = pct(v).toFixed(2) + '%'; el.classList.toggle('on', on); }
+    const item = XRAY_ELS.items[s.k];
+    if(item){
+      item.classList.toggle('on', on);
+      const val = item.querySelector('[data-val]');
+      if(val) val.textContent = fmtBytes(v) + ' GiB';
+    }
+  }
+  if(XRAY_ELS.total) XRAY_ELS.total.textContent = fmtBytes(total) + ' GiB';
+  if(XRAY_ELS.lim && XRAY_ELS.limit) XRAY_ELS.lim.style.opacity = (total > XRAY_ELS.limit) ? '1' : '.45';
+}
+
+
+/* per-strategy timeline (real numbers) with animation metadata */
+function fmtClock(s){
+  const m = Math.floor(s/60), ss = String(s%60).padStart(2,'0');
+  return `${String(m).padStart(2,'0')}:${ss}`;
+}
+/* The "reveal" beat: pause the loop and explain what is replicated vs sharded. */
+function makeReveal(c){
+  const { G, tp } = degrees(c);
+  const txt = {
+    dp: `With plain data parallelism all ${G} GPUs hold a <b>full replica</b> — weights, gradients and Adam state identical everywhere. Only activations are local.`,
+    z1: `Weights and gradients stay <b>replicated ×${G}</b>, but the optimizer is <b>sharded ×${G}</b>: each GPU owns 1/${G} of the master weights, Adam m and v.`,
+    z2: `Weights stay <b>replicated ×${G}</b>; gradients and the optimizer are now <b>sharded ×${G}</b> — each GPU keeps only its slice.`,
+    z3: `Everything is <b>sharded ×${G}</b> — weights, gradients and Adam state. Each GPU owns 1/${G} of the model itself.`,
+    tp: `Weights are <b>sharded</b> across the ${tp} GPUs in the NVLink domain (column/row slices); activations are <b>all-reduced</b>, so every GPU ends with the full activation.`,
+    pp: `Each stage owns a contiguous block of layers — those weights are <b>local</b>. Only activations and gradients cross stages.`,
+  }[c.strategy];
+  return {
+    kind:'reveal', title:'Reveal — what is shared?', prim:'Reveal',
+    text: txt, flow:null, dur:1.9, reveal:true,
+    beats:[
+      txt,
+      `This is the memory each GPU must hold across the whole training step.`,
+      `Only the sharded parts get updated locally — everything else is shared.`,
+    ],
+  };
+}
+function buildPhases(c){
+  const r = evaluate(c);
+  const { G, tp } = r.degrees;
+  const Pgb = fmtGiB(2 * c.nB * 1e9);
+  const L = deriveShape(c.nB).l;
+  const defs = {
+    dp: [
+      { kind:'compute', title:'Forward pass', text:`Every GPU runs the full model on its own batch — ${G} replicas of ${c.nB}B. Weights use ${fmtBytes(r.state.w)} GiB.`, flow:{ type:'compute' }, prim:'Forward' },
+      { kind:'compute', title:'Backward pass', text:`Local gradients computed on each GPU: ${fmtBytes(r.state.g)} GiB each.`, flow:{ type:'compute' }, prim:'Backward' },
+      { kind:'grads', title:'All-Reduce gradients', text:`Ring all-reduce (reduce-scatter + all-gather) moves ${Pgb} GB (2P). Each GPU ends with the full averaged gradient.`, flow:{ type:'ring', scope:'all', dir:1 }, prim:'All-Reduce' },
+      { kind:'opt', title:'Optimizer step', text:`Adam updates all ${c.nB}B weights on every GPU — ${fmtBytes(r.state.opt)} GiB of optimizer state per GPU.`, flow:{ type:'compute' }, prim:'Optimizer' },
+    ],
+    z1: [
+      { kind:'compute', title:'Forward pass', text:`Full weight replicas run the forward pass on all ${G} GPUs.`, flow:{ type:'compute' }, prim:'Forward' },
+      { kind:'compute', title:'Backward pass', text:`Full gradients produced locally: ${fmtBytes(r.state.g)} GiB per GPU.`, flow:{ type:'compute' }, prim:'Backward' },
+      { kind:'grads', title:'Reduce-Scatter gradients', text:`Gradients are summed and split: each GPU keeps 1/${G} = ${fmtBytes(r.state.g/G)} GiB.`, flow:{ type:'ring', scope:'all', dir:1 }, prim:'Reduce-Scatter' },
+      { kind:'opt', title:'Local optimizer step', text:`Adam updates only the optimizer shard this GPU owns: ${fmtBytes(r.state.opt)} GiB.`, flow:{ type:'compute' }, prim:'Optimizer' },
+      { kind:'weights', title:'All-Gather updated params', text:`Updated weights are shared back so every GPU again has a full replica (${Pgb} GB moved, 2P total).`, flow:{ type:'ring', scope:'all', dir:-1 }, prim:'All-Gather' },
+    ],
+    z2: [
+      { kind:'compute', title:'Forward pass', text:`Full weight replicas run the forward pass on all ${G} GPUs.`, flow:{ type:'compute' }, prim:'Forward' },
+      { kind:'compute', title:'Backward pass', text:`Gradients produced locally, then sharded — ${fmtBytes(r.state.g)} GiB per GPU.`, flow:{ type:'compute' }, prim:'Backward' },
+      { kind:'grads', title:'Reduce-Scatter gradients', text:`Each GPU keeps only its 1/${G} slice of gradients (${fmtBytes(r.state.g/G)} GiB) — gradient memory drops by ${G}×.`, flow:{ type:'ring', scope:'all', dir:1 }, prim:'Reduce-Scatter' },
+      { kind:'opt', title:'Local optimizer step', text:`Adam updates the optimizer shard it owns: ${fmtBytes(r.state.opt)} GiB.`, flow:{ type:'compute' }, prim:'Optimizer' },
+      { kind:'weights', title:'All-Gather updated params', text:`Updated weights are shared back to all GPUs (2P total including the reduce-scatter).`, flow:{ type:'ring', scope:'all', dir:-1 }, prim:'All-Gather' },
+    ],
+    z3: [
+      { kind:'weights', title:'All-Gather weights (forward)', text:`Before each layer, its weight shard is gathered from all GPUs over NVLink, used, then freed.`, flow:{ type:'ring', scope:'all', dir:-1 }, prim:'All-Gather', beats:[
+        'Before each layer runs, its weight shard is pulled from all GPUs over NVLink…',
+        'Assembling the full layer weights just-in-time…',
+        'Weights used for this layer — then freed, so peak memory stays one layer.',
+      ] },
+      { kind:'compute', title:'Forward pass', text:`Compute runs with temporarily-full layer weights; peak weight memory is one layer, not the whole model.`, flow:{ type:'compute' }, prim:'Forward', beats:[
+        'Forward runs with the gathered, full layer weights…',
+        'Only one layer’s weights need to be live at a time…',
+        'Layer done — its weights are dropped again.',
+      ] },
+      { kind:'weights', title:'All-Gather weights (backward)', text:`Weights are gathered a second time for the backward pass.`, flow:{ type:'ring', scope:'all', dir:-1 }, prim:'All-Gather', beats:[
+        'The same weight shards are gathered a second time, now for backward…',
+        'Reassembling full layer weights…',
+        'Backward ready — weights are freed again.',
+      ] },
+      { kind:'grads', title:'Reduce-Scatter gradients', text:`Gradients are reduced and sharded: ${fmtBytes(r.state.g)} GiB per GPU.`, flow:{ type:'ring', scope:'all', dir:1 }, prim:'Reduce-Scatter', beats:[
+        'Gradients are summed and immediately sliced…',
+        'Chunks circle the ring being partially reduced…',
+        `Each GPU keeps just its 1/${G} of the gradient.`,
+      ] },
+      { kind:'opt', title:'Local optimizer step', text:`Each GPU updates its 1/${G} shard of weights, gradients and optimizer state (3P total communication).`, flow:{ type:'compute' }, prim:'Optimizer', beats:[
+        'Each GPU updates only the shard of weights, grads and optimizer state it owns…',
+        'Adam reads its own momentum and velocity slice…',
+        'Shard updated — the gather/scatter pair repeats next step.',
+      ] },
+    ],
+    tp: [
+      { kind:'compute', title:'Column-parallel forward', text:`Each GPU computes a column-slice of every layer's matrices.`, flow:{ type:'compute' }, prim:'Forward', beats:[
+        'Each GPU computes a column-slice of this layer’s matrices…',
+        'The tensor is split across the GPUs in the NVLink domain…',
+        'Column slice done — an all-reduce will sum the partials.',
+      ] },
+      { kind:'weights', title:'All-Reduce activations', text:`Activations are summed across the ${tp} GPUs in the NVLink domain — twice per layer.`, flow:{ type:'ring', scope:'node', dir:1 }, prim:'All-Reduce', beats:[
+        'Partial results are summed across the GPUs in the NVLink domain…',
+        'All-reduce over the node’s high-speed link — twice per layer…',
+        'Every GPU now holds the full activation for this layer.',
+      ] },
+      { kind:'compute', title:'Row-parallel forward', text:`Second half of the layer, then another all-reduce — ${L} layers × 2.`, flow:{ type:'compute' }, prim:'Forward', beats:[
+        'The second half of the layer runs on each GPU’s slice…',
+        'Then another all-reduce — this happens twice per layer…',
+        'Row slice done for this layer.',
+      ] },
+      { kind:'grads', title:'Backward all-reduces', text:`The same two all-reduces run again for the backward pass — all intra-node over NVLink.`, flow:{ type:'ring', scope:'node', dir:-1 }, prim:'All-Reduce', beats:[
+        'The two all-reduces run again, now for the backward pass…',
+        'Still entirely intra-node over NVLink…',
+        'Gradients synced across the tensor group.',
+      ] },
+    ],
+    pp: [
+      { kind:'compute', title:'Forward: microbatches', text:`Microbatches flow stage → stage. Each stage holds ${(L/r.degrees.pp).toFixed(0)} layers.`, flow:{ type:'compute' }, prim:'Forward', beats:[
+        'Microbatches begin flowing stage → stage…',
+        'While one stage computes, the next waits for its input…',
+        'Batches are in flight down the pipeline.',
+      ] },
+      { kind:'acts', title:'Send activations', text:`Activations for each microbatch are sent to the next stage over InfiniBand (${MICROBATCHES} microbatches).`, flow:{ type:'chain', dir:1 }, prim:'Send / Recv', beats:[
+        'Stage s sends this microbatch’s activations to stage s+1…',
+        'The next microbatch launches so stages stay busy…',
+        'Activation delivered — the pipeline stays full.',
+      ] },
+      { kind:'grads', title:'Backward sends', text:`Gradients flow back through the stages. Pipeline bubble ≈ ${(bubbleFraction(c)*100).toFixed(0)}% idle.`, flow:{ type:'chain', dir:-1 }, prim:'Send / Recv', beats:[
+        'Gradients now flow back through the stages…',
+        'Each stage sends gradients to its predecessor…',
+        'Gradients delivered — the bubble is the idle waiting time.',
+      ] },
+      { kind:'opt', title:'Optimizer step', text:`Each stage updates its own layers — no weight communication at all.`, flow:{ type:'compute' }, prim:'Optimizer', beats:[
+        'Each stage updates only the layers it owns…',
+        'No weight communication happens between stages at all…',
+        'Stage-local update complete.',
+      ] },
+    ],
+  };
+  /* one iteration = base phases with a "reveal" pause inserted;
+     the loop runs the iteration exactly LOOP_ITERS times, then completes. */
+  const base = defs[c.strategy];
+  const reveal = makeReveal(c);
+  const ra = REVEAL_AFTER[c.strategy] ?? (base.length - 1);
+  const at = Math.min(base.length, ra + 1);
+  const oneIter = [...base.slice(0, at), reveal, ...base.slice(at)];
+
+  let t = 0;
+  const stamp = (p, extra) => { const e = Object.assign({}, p, extra, { time: fmtClock(t) }); t += 12; return e; };
+  const out = [];
+  for(let it=1; it<=LOOP_ITERS; it++){
+    oneIter.forEach(p=>{
+      const e = stamp(p, { iter:it });
+      if(e.reveal){
+        e.title = `Reveal — iteration ${it}`;
+        e.beats = [
+          `Iteration ${it} of ${LOOP_ITERS} — pause and look inside one GPU.`,
+          p.beats[0],
+          p.beats[2],
+        ];
+      }
+      out.push(e);
+    });
+  }
+  out.push(stamp({
+    kind:'done', title:'Training step complete', prim:'Complete',
+    text:`Two full iterations done. Each GPU held exactly the same steady-state memory as in iteration 1 — the loop simply repeats.`,
+    flow:null, dur:1.3, complete:true,
+    beats:[
+      `Iteration ${LOOP_ITERS} of ${LOOP_ITERS} complete — the loop repeats identically every step.`,
+      `Steady state: memory per GPU is unchanged from the previous iteration.`,
+      `Press <b>Play</b> to run the training loop again.`,
+    ],
+  }, {}));
+  return out;
+}
+function chipClassFor(kind){
+  return { weights:'weights', grads:'grads', opt:'opt', acts:'acts', compute:'' }[kind] ?? '';
+}
+/* Live commentary beats — shown as a subtitle while the timeline runs.
+   Keyed by phase prim; evenly spread across the phase so the message
+   tracks the motion. Phases may override with their own `beats` array. */
+const NARR = {
+  'Forward': [
+    'Feeding the next batch of tokens into the model…',
+    'Every layer runs forward; activations are kept for the backward pass…',
+    'Forward pass done — activations are held in memory.',
+  ],
+  'Backward': [
+    'Starting from the loss and walking back through the layers…',
+    'A gradient is computed for every weight, on every GPU…',
+    'Gradients are ready — one per parameter, held on each GPU.',
+  ],
+  'Optimizer': [
+    'Adam reads the momentum and velocity it owns…',
+    'Applying the parameter update to its slice…',
+    'Parameters updated.',
+  ],
+  'All-Reduce': [
+    'Each GPU swaps a gradient chunk with its ring neighbour…',
+    'Partial sums keep rolling all the way around the ring…',
+    'Every GPU now holds the complete averaged gradient.',
+  ],
+  'Reduce-Scatter': [
+    'Gradients are summed, but each GPU keeps only its slice…',
+    'Chunks circle the ring getting partially reduced…',
+    'Done — each GPU owns just 1/G of the reduced gradient.',
+  ],
+  'All-Gather': [
+    'Sharing the freshly-updated shards back out…',
+    'Each GPU broadcasts the piece it owns…',
+    'Every replica is whole again — all GPUs in sync.',
+  ],
+  'Send / Recv': [
+    'A stage hands its activations to the next stage…',
+    'The next microbatch starts while the previous is still moving…',
+    'Activations delivered — all stages stay busy, minimising the bubble.',
+  ],
+};
+function beatsFor(phase){
+  if(!phase) return [];
+  if(Array.isArray(phase.beats) && phase.beats.length) return phase.beats;
+  return NARR[phase.prim] || [phase.text || ''];
+}
+let PHASES = [];
+function renderLog(c){
+  PHASES = buildPhases(c);
+  document.getElementById('logBody').innerHTML = PHASES.map((e,idx)=>{
+    const tag = e.complete ? 'done' : (e.iter ? `iter ${e.iter}/${LOOP_ITERS}` : '');
+    const prim = e.kind==='compute' ? `<span class="chip">${e.title}</span>`
+               : `<span class="chip ${chipClassFor(e.kind)}">${e.prim}</span>`;
+    const body = e.kind==='compute' ? e.text : `<b>${e.title}:</b> ${e.text}`;
+    return `
+    <div class="log-entry ${e.kind}" data-phase="${idx}">
+      <div class="log-time mono">${e.time}<small>${tag}</small></div>
+      <div class="log-main">
+        <div class="log-prim">${prim}</div>
+        ${body}
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('logChip').textContent = STRATEGY_LABELS[c.strategy];
+  renderTransport(PHASES.length);
+}
+function setActivePhase(i){
+  document.querySelectorAll('.log-entry').forEach(el=>el.classList.toggle('active', +el.dataset.phase === i));
+  const el = document.querySelector(`.log-entry[data-phase="${i}"]`);
+  if(el && el.parentElement){
+    const body = el.parentElement;
+    const top = el.offsetTop - body.clientHeight/2 + el.clientHeight/2;
+    body.scrollTo({ top: Math.max(top,0), behavior:'smooth' });
+  }
+}
+function renderTransport(n){
+  document.getElementById('phaseDots').innerHTML = Array.from({length:n},(_,i)=>`<i data-dot="${i}"></i>`).join('');
+}
+
+/* charts (Chart.js) */
+let charts = { mem:null, comm:null };
+
+function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function chartTheme(){
+  return {
+    weights:cssVar('--weights'), grads:cssVar('--grads'), opt:cssVar('--opt'), acts:cssVar('--acts'),
+    oom:cssVar('--oom'), muted:cssVar('--muted'), text:cssVar('--text'), grid:cssVar('--hairline') || 'rgba(128,128,128,.15)',
+  };
+}
+const limitLinePlugin = {
+  id:'limitLine',
+  afterDatasetsDraw(chart){
+    const cfg = chart.options.plugins.limitLine;
+    if(!cfg || cfg.value == null || !chart.scales.y) return;
+    const y = chart.scales.y.getPixelForValue(cfg.value);
+    const { left, right } = chart.chartArea;
+    if(y < chart.chartArea.top || y > chart.chartArea.bottom) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = cfg.color; ctx.setLineDash([6,5]); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = cfg.color; ctx.font = '600 10px Inter, sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(`${cfg.value} GB limit`, right - 2, y - 5);
+    ctx.restore();
+  },
+};
+if(window.Chart) Chart.register(limitLinePlugin);
+
+function renderCharts(c){
+  const ref = document.getElementById('reference');
+  if(!ref || !ref.open) return;
+  buildMemChart(c);
+  buildCommChart(c);
+}
+function buildMemChart(c){
+  const t = chartTheme();
+  const order = ['dp','z1','z2','z3','tp','pp'];
+  const rows = order.map(s=>{ const r = evaluate(Object.assign({}, c, { strategy:s })); return { s, r }; });
+  const limit = c.vram;
+  const yMax = Math.max(limit, ...rows.map(x=>x.r.perGpu/GiB)) * 1.15;
+  const data = {
+    labels: rows.map(x=>STRATEGY_SHORT[x.s]),
+    datasets: [
+      { label:'Weights',     data:rows.map(x=>x.r.state.w/GiB), backgroundColor:t.weights, stack:'s' },
+      { label:'Gradients',   data:rows.map(x=>x.r.state.g/GiB), backgroundColor:t.grads,   stack:'s' },
+      { label:'Optimizer',   data:rows.map(x=>x.r.state.opt/GiB), backgroundColor:t.opt,   stack:'s' },
+      { label:'Activations', data:rows.map(x=>x.r.act/GiB), backgroundColor:t.acts,        stack:'s' },
+    ],
+  };
+  const options = {
+    responsive:true, maintainAspectRatio:false, animation:{ duration:320 },
+    plugins: {
+      legend:{ display:false },
+      limitLine:{ value:limit, color:t.oom },
+      tooltip:{
+        callbacks:{
+          label:(ctx)=>`${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} GiB`,
+          title:(items)=>`${items[0].label}${rows[items[0].dataIndex].r.fits ? '' : ' ⚠ over limit'}`,
+        },
+      },
+    },
+    scales: {
+      x:{ stacked:true, grid:{ display:false }, ticks:{ color:(ctx)=> rows[ctx.index] && !rows[ctx.index].r.fits ? t.oom : t.muted, font:{ size:10, weight:'600' } } },
+      y:{ stacked:true, max:yMax, grid:{ color:t.grid }, ticks:{ color:t.muted, font:{ size:10 } } },
+    },
+  };
+  if(charts.mem){ charts.mem.data = data; charts.mem.options = options; charts.mem.resize(); charts.mem.update(); return; }
+  charts.mem = new Chart(document.getElementById('memChart'), { type:'bar', data, options });
+}
+function buildCommChart(c){
+  const t = chartTheme();
+  const order = ['dp','z1','z2','z3','tp','pp'];
+  const rows = order.map(s=>{ const cb = commBytes(Object.assign({}, c, { strategy:s })); return { s, gb: cb.bytes/GiB }; });
+  const colors = rows.map(x => x.s==='z3' ? t.grads : (x.s==='tp'||x.s==='pp') ? t.opt : t.weights);
+  const data = {
+    labels: rows.map(x=>STRATEGY_SHORT[x.s]),
+    datasets:[{ label:'GiB / step', data:rows.map(x=>x.gb), backgroundColor:colors, borderRadius:6, barPercentage:.62, categoryPercentage:.8 }],
+  };
+  const options = {
+    responsive:true, maintainAspectRatio:false, animation:{ duration:320 },
+    plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:ctx=>`${ctx.parsed.y.toFixed(2)} GiB / step` } } },
+    scales:{ x:{ grid:{ display:false }, ticks:{ color:t.muted, font:{ size:10, weight:'600' } } },
+             y:{ grid:{ color:t.grid }, ticks:{ color:t.muted, font:{ size:10 } } } },
+  };
+  if(charts.comm){ charts.comm.data = data; charts.comm.options = options; charts.comm.resize(); charts.comm.update(); return; }
+  charts.comm = new Chart(document.getElementById('commChart'), { type:'bar', data, options });
+}
+function renderTable(c){
+  const defs = [
+    ['dp','Flat / ring','Baseline; model fits, maximise throughput'],
+    ['z1','All GPUs','Optimizer state dominates'],
+    ['z2','All GPUs','Gradients also large'],
+    ['z3','All GPUs','Model itself does not fit'],
+    ['tp','Intra-node (NVLink)','Single layer too large'],
+    ['pp','Inter-node (IB)','Too many layers for one node'],
+  ];
+  document.getElementById('cmpBody').innerHTML = defs.map(([s,topo,use])=>{
+    const cc = Object.assign({}, c, { strategy:s });
+    const r = evaluate(cc);
+    const bpw = ((r.state.w + r.state.g + r.state.opt) / (c.nB*1e9)).toFixed(2);
+    const gb = commBytes(cc).bytes / GiB;
+    const active = s===c.strategy ? 'active-row' : '';
+    return `<tr class="${active}">
+      <td class="name">${STRATEGY_LABELS[s]}</td>
+      <td class="mono">${bpw}</td>
+      <td class="mono">${fmtBytes(r.stateTotal)}</td>
+      <td>${r.fits ? '<span class="tag-fit">fits</span>' : '<span class="tag-oom">OOM</span>'}</td>
+      <td class="mono">${gb.toFixed(1)} GiB</td>
+      <td>${topo}</td>
+      <td>${use}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* feasibility grid — every strategy at the current model / topology / VRAM */
+function renderFeas(c){
+  const host = document.getElementById('feasBody');
+  if(!host) return;
+  const order = ['dp','z1','z2','z3','tp','pp'];
+  const head = `<div class="feas-row feas-head">
+      <span class="feas-name">Strategy</span>
+      <span class="feas-mem">State / GPU</span>
+      <span class="feas-fit">Fits?</span>
+      <span class="feas-comm">Comm / step</span>
+    </div>`;
+  host.innerHTML = head + order.map(s=>{
+    const cc = Object.assign({}, c, { strategy:s });
+    const r = evaluate(cc);
+    const comm = commBytes(cc).bytes / GiB;
+    const active = s === c.strategy ? ' active' : '';
+    return `<div class="feas-row${active}" data-strat="${s}">
+      <span class="feas-name">${STRATEGY_SHORT[s]}</span>
+      <span class="feas-mem mono">${fmtBytes(r.perGpu)}</span>
+      <span class="feas-fit">${r.fits ? '<span class="tag-fit">fits</span>' : '<span class="tag-oom">OOM</span>'}</span>
+      <span class="feas-comm mono">${comm.toFixed(1)} GiB</span>
+    </div>`;
+  }).join('');
+  const chip = document.getElementById('feasChip');
+  if(chip) chip.textContent = `${c.nB}B · ${c.nodes}\u00d7${c.perNode} · ${c.vram} GB`;
+}
+/* lock panel — pin the current setup to drive the Walkthrough */
+function renderLock(c){
+  const body = document.getElementById('lockBody');
+  if(body){
+    if(LOCKED){
+      body.innerHTML = `
+        <div class="lock-state locked">
+          <div class="lock-ico"><i data-lucide="lock" class="w-5 h-5"></i></div>
+          <div class="lock-txt">
+            <div class="lock-title">Setup locked</div>
+            <div class="lock-sub mono">${lockSummary(LOCKED)}</div>
+          </div>
+          <button class="btn" id="unlockBtn"><i data-lucide="lock-open" class="w-4 h-4"></i>Unlock</button>
+        </div>`;
+    } else {
+      body.innerHTML = `
+        <div class="lock-state">
+          <div class="lock-ico"><i data-lucide="lock-open" class="w-5 h-5"></i></div>
+          <div class="lock-txt">
+            <div class="lock-title">Nothing locked yet</div>
+            <div class="lock-sub">Set the knobs above, then lock to replay this exact setup in the Walkthrough.</div>
+          </div>
+          <button class="btn primary" id="lockBtn"><i data-lucide="lock" class="w-4 h-4"></i>Lock this setup</button>
+        </div>`;
+    }
+  }
+  const chip = document.getElementById('lockChip');
+  if(chip) chip.textContent = LOCKED ? lockSummary(LOCKED) : 'not locked';
+  if(window.lucide) lucide.createIcons();
+}
+function wireLockers(){
+  const panel = document.getElementById('panelLock');
+  if(panel) panel.addEventListener('click', e=>{
+    if(e.target.closest('#lockBtn')) lockCurrent(CONFIG);
+    else if(e.target.closest('#unlockBtn')) unlockCurrent();
+  });
+  const feas = document.getElementById('panelFeas');
+  if(feas) feas.addEventListener('click', e=>{
+    const row = e.target.closest('.feas-row[data-strat]');
+    if(!row) return;
+    CONFIG.strategy = row.dataset.strat; syncControls(CONFIG); renderAll();
+  });
+}
+
+/* stats */
+function renderStats(c){
+  const r = evaluate(c);
+  document.getElementById('statStrategy').textContent = STRATEGY_LABELS[c.strategy];
+  document.getElementById('statGpus').textContent = r.degrees.G;
+  document.getElementById('statState').innerHTML = `${fmtBytes(r.stateTotal)}<small> GiB</small>`;
+  document.getElementById('statComm').textContent = r.comm.mult;
+}
+
+/* ============================================================
+   5b. FLOW ANIMATION ENGINE
+   ============================================================ */
+const NS = 'http://www.w3.org/2000/svg';
+let NODES = [];
+let PACKETS = [];
+const anim = { playing:false, index:0, t:0, speed:1, raf:null, last:0, baseDur:3600 };
+
+function layoutFlow(){
+  const stage = document.getElementById('topoStage');
+  const svg = document.getElementById('flowSvg');
+  if(!stage || !svg) return;
+  const sr = stage.getBoundingClientRect();
+  svg.setAttribute('viewBox', `0 0 ${sr.width} ${sr.height}`);
+  svg.setAttribute('width', sr.width); svg.setAttribute('height', sr.height);
+  NODES = [];
+  document.querySelectorAll('#topology .gpu').forEach(el=>{
+    const box = el.querySelector('.chip') || el;
+    const r = box.getBoundingClientRect();
+    const i = +el.dataset.gpu;
+    NODES.push({ i, node:Math.floor(i / CONFIG.perNode), x:r.left - sr.left + r.width/2, y:r.top - sr.top + r.height/2, el });
+  });
+  NODES.sort((a,b)=>a.i - b.i);
+}
+function edgesFor(flow){
+  const n = NODES.length, es = [];
+  if(!flow || flow.type === 'compute' || n < 2) return es;
+  const per = CONFIG.perNode;
+  if(flow.type === 'ring'){
+    if(flow.scope === 'node'){
+      for(let s=0; s<n; s+=per){
+        const cnt = Math.min(per, n - s);
+        for(let k=0; k<cnt; k++) es.push([NODES[s+k], NODES[s + ((k+1)%cnt)]]);
+      }
+    } else {
+      for(let k=0; k<n; k++) es.push([NODES[k], NODES[(k+1)%n]]);
+    }
+  } else if(flow.type === 'chain'){
+    for(let k=0; k<n-1; k++) es.push([NODES[k], NODES[k+1]]);
+  } else if(flow.type === 'star'){
+    for(let k=1; k<n; k++) es.push([NODES[0], NODES[k]]);
+  }
+  if(flow.dir === -1) es.forEach(e=>e.reverse());
+  return es;
+}
+function pointOnEdge(A, B, t, arc){
+  const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx,dy) || 1;
+  const nx = -dy/len, ny = dx/len;
+  const cx = (A.x+B.x)/2 + nx*len*arc, cy = (A.y+B.y)/2 + ny*len*arc;
+  const u = 1 - t;
+  return { x: u*u*A.x + 2*u*t*cx + t*t*B.x, y: u*u*A.y + 2*u*t*cy + t*t*B.y };
+}
+function buildPackets(phase){
+  const svg = document.getElementById('flowSvg');
+  if(!svg) return;
+  svg.querySelectorAll('.packet').forEach(n=>n.remove());
+  PACKETS = [];
+  if(!phase || !phase.flow || phase.flow.type === 'compute') return;
+  const es = edgesFor(phase.flow);
+  const per = phase.flow.type === 'chain' ? 3 : 2;
+  es.forEach(([A,B], ei)=>{
+    const color = cssVar(A.node === B.node ? '--nvlink' : '--ib');
+    for(let p=0; p<per; p++){
+      const c = document.createElementNS(NS, 'circle');
+      c.setAttribute('r','3.2'); c.setAttribute('fill',color); c.setAttribute('class','packet');
+      c.style.filter = `drop-shadow(0 0 4px ${color})`;
+      svg.appendChild(c);
+      PACKETS.push({ A, B, el:c, offset:p/per, arc:(ei%2 ? -1 : 1)*0.16 });
+    }
+  });
+}
+function setFlowChip(phase){
+  const chip = document.getElementById('flowChip');
+  if(!chip) return;
+  if(!phase){ chip.textContent = 'idle'; chip.className = 'chip'; return; }
+  chip.textContent = phase.prim || phase.title;
+  chip.className = 'chip ' + (['weights','grads','opt','acts'].includes(phase.kind) ? phase.kind : '');
+}
+/* live commentary subtitle — updates the phase chip and the current beat */
+let _capPhaseLast = null;
+function setCaptionPhase(phase){
+  const chip = document.getElementById('capPhase');
+  if(!chip) return;
+  const key = phase ? (phase.title || phase.prim) : 'idle';
+  if(_capPhaseLast === key) return;
+  _capPhaseLast = key;
+  chip.textContent = key;
+  chip.className = 'sc-chip chip ' + (phase && ['weights','grads','opt','acts'].includes(phase.kind) ? phase.kind : '');
+}
+let _capLast = null;
+function setCaption(text){
+  const el = document.getElementById('capText');
+  if(!el || _capLast === text) return;
+  _capLast = text;
+  el.innerHTML = text;
+  el.classList.remove('beat-in'); void el.offsetWidth; el.classList.add('beat-in');
+}
+function captionIdle(msg){
+  setCaptionPhase(null);
+  setCaption(msg || 'Press <b>Play</b> to run the timeline.');
+}
+function startPhase(i){
+  if(!PHASES.length) return;
+  const phase = PHASES[i];
+  document.body.classList.toggle('reveal-on', phase.kind === 'reveal');
+  document.body.classList.toggle('loop-complete', phase.kind === 'done');
+  setActivePhase(i);
+  setFlowChip(phase);
+  setCaptionPhase(phase);
+  setCaption(beatsFor(phase)[0]);
+  buildPackets(phase);
+  document.querySelectorAll('#phaseDots i').forEach((d,k)=>d.classList.toggle('on', k <= i));
+}
+function drawFrame(){
+  const phase = PHASES[anim.index];
+  if(!phase) return;
+  const n = PHASES.length;
+  document.getElementById('progressBar').style.width = (((anim.index + anim.t)/n)*100).toFixed(2) + '%';
+  const iterTxt = phase.complete ? '' : (phase.iter ? `Iter ${phase.iter}/${LOOP_ITERS} · ` : '');
+  document.getElementById('phaseLabel').textContent = `${iterTxt}${phase.prim || phase.title} · ${anim.index+1}/${n}`;
+
+  /* advance the live commentary beat as the phase progresses */
+  setCaptionPhase(phase);
+  const beats = beatsFor(phase);
+  if(beats.length){
+    const bi = Math.min(beats.length-1, Math.floor(anim.t * beats.length));
+    setCaption(beats[bi]);
+  }
+  updateXray(anim.index, anim.t);
+
+  if(phase.flow && phase.flow.type === 'compute' && NODES.length){
+    const active = Math.floor(anim.t * NODES.length) % NODES.length;
+    NODES.forEach((nd,k)=>{
+      nd.el.classList.toggle('pulse', k === active);
+      nd.el.classList.toggle('grads', k === active && phase.kind === 'grads');
+      nd.el.classList.toggle('opt', k === active && phase.kind === 'opt');
+    });
+  } else {
+    NODES.forEach(nd=>nd.el.classList.remove('pulse','grads','opt'));
+  }
+
+  PACKETS.forEach(pk=>{
+    const t = (anim.t + pk.offset) % 1;
+    const pt = pointOnEdge(pk.A, pk.B, t, pk.arc);
+    pk.el.setAttribute('cx', pt.x.toFixed(1));
+    pk.el.setAttribute('cy', pt.y.toFixed(1));
+    pk.el.setAttribute('opacity', (0.3 + 0.7*Math.sin(Math.PI*t)).toFixed(2));
+  });
+}
+function tick(ts){
+  if(!anim.playing) return;
+  if(!anim.last) anim.last = ts;
+  const dt = Math.min(ts - anim.last, 80);
+  anim.last = ts;
+  const phase = PHASES[anim.index];
+  anim.t += dt / ((anim.baseDur * ((phase && phase.dur) || 1)) / anim.speed);
+  if(anim.t >= 1){
+    if(anim.index < PHASES.length - 1){ anim.index++; anim.t = 0; startPhase(anim.index); }
+    else { anim.t = 1; drawFrame(); pauseAnim(); return; }
+  }
+  drawFrame();
+  anim.raf = requestAnimationFrame(tick);
+}
+function playAnim(){
+  if(anim.playing || !PHASES.length) return;
+  if(anim.index >= PHASES.length - 1 && anim.t >= 1) resetAnim();
+  document.body.classList.remove('loop-complete');
+  anim.playing = true; anim.last = 0;
+  buildPackets(PHASES[anim.index]);
+  document.getElementById('playBtn').setAttribute('aria-pressed','true');
+  document.getElementById('pauseBtn').setAttribute('aria-pressed','false');
+  anim.raf = requestAnimationFrame(tick);
+}
+function pauseAnim(){
+  anim.playing = false;
+  if(anim.raf){ cancelAnimationFrame(anim.raf); anim.raf = null; }
+  const p = document.getElementById('playBtn'), q = document.getElementById('pauseBtn');
+  if(p) p.setAttribute('aria-pressed','false');
+  if(q) q.setAttribute('aria-pressed','true');
+  NODES.forEach(nd=>nd.el.classList.remove('pulse','grads','opt'));
+}
+function goToPhase(i){
+  pauseAnim();
+  anim.index = Math.max(0, Math.min(PHASES.length-1, i));
+  anim.t = 0;
+  startPhase(anim.index);
+  drawFrame();
+}
+function stepForward(){ goToPhase(anim.index + 1); }
+function stepBackward(){ goToPhase(anim.index - 1); }
+function resetAnim(){ pauseAnim(); document.body.classList.remove('reveal-on','loop-complete'); anim.index = 0; anim.t = 0; if(PHASES.length) startPhase(0); drawFrame(); }
+function stopAnim(){ pauseAnim(); document.body.classList.remove('reveal-on','loop-complete'); const svg=document.getElementById('flowSvg'); if(svg) svg.querySelectorAll('.packet').forEach(n=>n.remove()); PACKETS=[]; }
+
+function wireTransport(){
+  document.getElementById('playBtn').addEventListener('click', ()=>{ playAnim(); scrollToStage(); });
+  document.getElementById('pauseBtn').addEventListener('click', pauseAnim);
+  document.getElementById('stepFwdBtn').addEventListener('click', ()=>{ stepForward(); scrollToStage(); });
+  document.getElementById('stepBackBtn').addEventListener('click', ()=>{ stepBackward(); scrollToStage(); });
+  document.getElementById('resetBtn').addEventListener('click', resetAnim);
+  const speedSeg = document.querySelector('[data-seg="speed"]');
+  speedSeg.querySelectorAll('button').forEach(b=>{
+    b.addEventListener('click',()=>{ anim.speed = parseFloat(b.getAttribute('data-val')) || 1; });
+  });
+}
+
+/* ============================================================
+   6. MASTER RENDER + WIRING
+   ============================================================ */
+function renderAll(){
+  stopAnim();
+  renderStats(CONFIG);
+  renderTopology(CONFIG);
+  renderLog(CONFIG);
+  renderXray(CONFIG);
+  renderCharts(CONFIG);
+  renderTable(CONFIG);
+  renderFeas(CONFIG);
+  renderLock(CONFIG);
+  layoutFlow();
+  anim.index = 0; anim.t = 0;
+  if(PHASES.length) startPhase(0);
+  drawFrame();
+  checkGoal();
+  if(window.lucide) lucide.createIcons();
+}
+
+function wireSegments(){
+  document.querySelectorAll('.seg').forEach(seg=>{
+    seg.querySelectorAll('button').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        seg.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed','false'));
+        btn.setAttribute('aria-pressed','true');
+        const key = seg.getAttribute('data-seg');
+        const val = btn.getAttribute('data-val');
+        if(key==='strategy'){ CONFIG.strategy = val; renderAll(); }
+        else if(key==='nodes'){ CONFIG.nodes = parseInt(val,10); renderAll(); }
+        else if(key==='perNode'){ CONFIG.perNode = parseInt(val,10); renderAll(); }
+        else if(key==='vram'){ CONFIG.vram = parseInt(val,10); renderAll(); }
+        else if(key==='theme'){ applyTheme(val); savePrefs(); }
+      });
+    });
+  });
+}
+function wireInputs(){
+  const model = document.getElementById('inModel');
+  model.addEventListener('input',()=>{ CONFIG.nB = parseFloat(model.value); document.getElementById('lblModel').textContent = model.value; renderAll(); });
+  const batch = document.getElementById('inBatch');
+  batch.addEventListener('input',()=>{ CONFIG.batch = parseInt(batch.value,10); document.getElementById('lblBatch').textContent = batch.value; renderAll(); });
+  const seq = document.getElementById('inSeq');
+  seq.addEventListener('input',()=>{ CONFIG.seq = parseInt(seq.value,10); document.getElementById('lblSeq').textContent = seq.value; renderAll(); });
+  const ckpt = document.getElementById('inCkpt');
+  const sw = document.getElementById('ckptSwitch'), knob = document.getElementById('ckptKnob');
+  ckpt.addEventListener('change',()=>{
+    CONFIG.ckpt = ckpt.checked;
+    sw.style.background = ckpt.checked ? 'linear-gradient(180deg,#67e8f9,var(--weights))' : 'var(--inset)';
+    knob.style.transform = ckpt.checked ? 'translateX(20px)' : 'translateX(0)';
+    knob.style.background = ckpt.checked ? '#04121a' : 'var(--muted)';
+    renderAll();
+  });
+}
+function renderStepper(){
+  document.getElementById('stepper').innerHTML = LESSONS.map(l=>`
+    <button aria-current="${l.id===0}" data-lesson="${l.id}"><span class="n mono">${l.n}</span>${l.label}</button>`).join('');
+}
+/* ============================================================
+   7. APP SHELL — prefs, options, router, panel mounting, goals
+   ============================================================ */
+function savePrefs(){ try{ localStorage.setItem('dt-prefs', JSON.stringify(PREFS)); }catch(e){} }
+function saveProgress(){ try{ localStorage.setItem('dt-progress', JSON.stringify({ ver:APP_VERSION, view:PROGRESS.view, step:PROGRESS.step, completed:PROGRESS.completed })); }catch(e){} }
+function loadState(){
+  try{
+    const p = JSON.parse(localStorage.getItem('dt-prefs') || '{}'); Object.assign(PREFS, p);
+    const g = JSON.parse(localStorage.getItem('dt-progress') || '{}');
+    if(g.ver === APP_VERSION){
+      if(typeof g.step === 'number') PROGRESS.step = Math.max(0, Math.min(STEPS.length-1, g.step));
+      if(Array.isArray(g.completed)) PROGRESS.completed = g.completed;
+    }
+    if(g.view === 'explore' || g.view === 'guide') PROGRESS.view = g.view;
+    const L = JSON.parse(localStorage.getItem('dt-lock') || 'null');
+    if(L && L.strategy) LOCKED = L;
+  }catch(e){}
+}
+function lockSummary(L){
+  if(!L) return '';
+  const gp = L.nodes * L.perNode;
+  return `${STRATEGY_LABELS[L.strategy]} · ${L.nodes}×${L.perNode} = ${gp} GPUs · ${L.nB}B · ${L.vram} GB`;
+}
+function lockCurrent(c){
+  LOCKED = { strategy:c.strategy, nodes:c.nodes, perNode:c.perNode, nB:c.nB, vram:c.vram, batch:c.batch, seq:c.seq, ckpt:c.ckpt };
+  try{ localStorage.setItem('dt-lock', JSON.stringify(LOCKED)); }catch(e){}
+  renderLock(CONFIG); updateNav(); toast('Setup locked');
+}
+function unlockCurrent(){
+  LOCKED = null;
+  try{ localStorage.removeItem('dt-lock'); }catch(e){}
+  renderLock(CONFIG); updateNav(); toast('Unlocked');
+}
+function motionOff(){ return !!PREFS.reducedMotion || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+
+function setSeg(name, val){
+  const seg = document.querySelector(`[data-seg="${name}"]`);
+  if(!seg) return;
+  seg.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed', String(b.getAttribute('data-val') === String(val))));
+}
+function syncControls(c){
+  setSeg('strategy', c.strategy); setSeg('nodes', String(c.nodes)); setSeg('perNode', String(c.perNode)); setSeg('vram', String(c.vram));
+  const m = document.getElementById('inModel');
+  if(m){ m.value = c.nB; const l = document.getElementById('lblModel'); if(l) l.textContent = c.nB; }
+  const b = document.getElementById('inBatch');
+  if(b){ b.value = c.batch; const l = document.getElementById('lblBatch'); if(l) l.textContent = c.batch; }
+  const s = document.getElementById('inSeq');
+  if(s){ s.value = c.seq; const l = document.getElementById('lblSeq'); if(l) l.textContent = c.seq; }
+  const ck = document.getElementById('inCkpt');
+  if(ck){
+    ck.checked = c.ckpt;
+    const sw = document.getElementById('ckptSwitch'), knob = document.getElementById('ckptKnob');
+    if(sw) sw.style.background = c.ckpt ? 'linear-gradient(180deg,#67e8f9,var(--weights))' : 'var(--inset)';
+    if(knob){ knob.style.transform = c.ckpt ? 'translateX(20px)' : 'translateX(0)'; knob.style.background = c.ckpt ? '#04121a' : 'var(--muted)'; }
+  }
+}
+
+/* panel mounting — panels are singletons relocated into views/steps */
+function captureHomes(){
+  Object.values(PANELS).forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) PANEL_HOMES.set(id, { parent:el.parentElement, next:el.nextElementSibling });
+  });
+}
+function clearPanels(){
+  const home = PANEL_HOMES;
+  Object.values(PANELS).forEach(id=>{
+    const el = document.getElementById(id), h = home.get(id);
+    if(!el) return;
+    if(h && h.parent){
+      if(h.next && h.next.parentElement === h.parent) h.parent.insertBefore(el, h.next);
+      else h.parent.appendChild(el);
+    }
+  });
+}
+function mountForStep(step){
+  clearPanels();
+  const visual = document.getElementById('stepVisual');
+  visual.innerHTML = '';
+
+  const names = step.panels || [];
+  /* when a step shows both, the X-ray lives INSIDE the topology card (split) */
+  const hostXray = names.includes('topology') && names.includes('xray');
+  const mountXray = ()=>{
+    if(!hostXray) return;
+    const el = document.getElementById(PANELS.xray), host = document.getElementById('xrayHost');
+    if(el && host) host.appendChild(el);
+  };
+
+  if(step.stage){
+    /* cinema stage: the flow + its controls on the left, live narration pinned right */
+    const row = document.createElement('div'); row.className = 'step-row stage';
+    const left = document.createElement('div'); left.className = 'stage-left';
+    const right = document.createElement('div'); right.className = 'stage-right';
+    names.forEach(name=>{
+      if(name === 'log') return;
+      if(name === 'xray' && hostXray) return;            // handled by mountXray
+      const el = document.getElementById(PANELS[name]); if(el) left.appendChild(el);
+    });
+    if(names.includes('log')){
+      const el = document.getElementById(PANELS.log); if(el) right.appendChild(el);
+    }
+    row.appendChild(left); row.appendChild(right); visual.appendChild(row);
+    mountXray();
+    return;
+  }
+  const src = step.layout || names.map(p=>[p]);
+  src.forEach(row=>{
+    const keep = hostXray ? row.filter(n=>n !== 'xray') : row;
+    if(!keep.length) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'step-row' + (keep.length > 1 ? ' cols-' + keep.length : '');
+    keep.forEach(name=>{ const el = document.getElementById(PANELS[name]); if(el) wrap.appendChild(el); });
+    if(wrap.children.length) visual.appendChild(wrap);
+  });
+  mountXray();
+}
+function mountExplore(){
+  clearPanels();
+}
+
+/* guided scroll — keep the flow + narration + controls in view */
+function scrollToStage(){
+  if(PROGRESS.view !== 'guide') return;
+  const el = document.querySelector('#guideView .step-row.stage') || document.getElementById('panelTopology');
+  if(!el) return;
+  const r = el.getBoundingClientRect();
+  const headerH = 78, pad = 10, vh = window.innerHeight;
+  let delta = 0;
+  if(r.height > vh - headerH - pad)      delta = r.top - headerH - pad;   /* taller than screen: pin the top */
+  else if(r.top < headerH + pad)         delta = r.top - headerH - pad;   /* above: pull down */
+  else if(r.bottom > vh - pad)           delta = r.bottom - (vh - pad);   /* below: nudge up, keep title */
+  if(Math.abs(delta) > 4) window.scrollTo({ top: window.scrollY + delta, behavior: motionOff() ? 'auto' : 'smooth' });
+}
+
+/* preferences */
+function renderOptions(){
+  const host = document.getElementById('optionsList');
+  if(!host) return;
+  host.innerHTML = PREF_META.map(([k,label])=>`
+    <label class="op-row"><span>${label}</span>
+      <input type="checkbox" class="sr-only" data-pref="${k}" ${PREFS[k]?'checked':''}>
+      <span class="switch"><i></i></span></label>`).join('');
+  host.querySelectorAll('input[data-pref]').forEach(inp=>{
+    inp.addEventListener('change',()=>{ PREFS[inp.dataset.pref] = inp.checked; applyPrefs(); savePrefs(); });
+  });
+  setSeg('theme', PREFS.theme);
+}
+function applyPrefs(){
+  const b = document.body;
+  b.classList.toggle('pref-no-glossary', !PREFS.glossary);
+  b.classList.toggle('pref-advanced', !!PREFS.advancedConfig);
+  b.classList.toggle('pref-reduced', !!PREFS.reducedMotion);
+  document.querySelectorAll('details.math-box').forEach(d=>d.open = !!PREFS.showMath);
+  document.querySelectorAll('details.deep-box').forEach(d=>d.open = !!PREFS.showDeepDive);
+}
+function openOptions(){ document.getElementById('optionsPop').hidden = false; document.getElementById('optionsBtn').setAttribute('aria-expanded','true'); }
+function closeOptions(){ document.getElementById('optionsPop').hidden = true; document.getElementById('optionsBtn').setAttribute('aria-expanded','false'); }
+
+/* toast */
+function toast(msg){
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  requestAnimationFrame(()=>t.classList.add('show'));
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(), 300); }, 1800);
+}
+
+/* goal checking */
+let CURRENT_STEP = null;
+function checkGoal(){
+  const step = CURRENT_STEP;
+  const st = document.getElementById('exState');
+  if(!step || !step.experiment || !step.experiment.goal || !st) return;
+  let met = false;
+  try{ met = !!step.experiment.goal(CONFIG, evaluate(CONFIG)); }catch(e){}
+  if(met){
+    st.textContent = 'Done'; st.className = 'ex-state ok';
+    if(!PROGRESS.completed.includes(step.id)){ PROGRESS.completed.push(step.id); saveProgress(); updateDots(); toast('Goal met'); }
+  } else {
+    st.textContent = 'Not yet'; st.className = 'ex-state';
+  }
+}
+
+/* navigation */
+function updateDots(){
+  const host = document.getElementById('stepDots');
+  if(!host) return;
+  host.innerHTML = STEPS.map((s,k)=>{
+    const cls = [k === PROGRESS.step ? 'on' : '', PROGRESS.completed.includes(s.id) ? 'done' : ''].filter(Boolean).join(' ');
+    return `<i class="${cls}" data-step="${k}" title="${(s.kicker||'')}"></i>`;
+  }).join('');
+  host.querySelectorAll('i').forEach(d=>d.addEventListener('click',()=>gotoStep(+d.dataset.step)));
+}
+function updateNav(){
+  const n = STEPS.length, i = PROGRESS.step, last = i === n-1;
+  document.getElementById('stepCounter').textContent = `Step ${i+1} / ${n}`;
+  document.getElementById('topProgressBar').style.width = ((i+1)/n*100) + '%';
+  document.getElementById('prevBtn').disabled = i === 0;
+  document.getElementById('nextBtn').innerHTML = last
+    ? '<i data-lucide="check" class="w-4 h-4"></i>Finish'
+    : 'Next<i data-lucide="arrow-right" class="w-4 h-4"></i>';
+  document.querySelectorAll('#stepper button').forEach(b=>{
+    b.setAttribute('aria-current', String(CURRENT_STEP && +b.dataset.lesson === CURRENT_STEP.lesson));
+  });
+  updateDots();
+  if(window.lucide) lucide.createIcons();
+}
+function expanderBox(icon, txt, cls, html, color){
+  const d = document.createElement('details'); d.className = 'expander ' + cls;
+  d.innerHTML = `<summary><i data-lucide="${icon}" class="w-4 h-4" style="color:${color}"></i>${txt}<i data-lucide="chevron-right" class="chev w-4 h-4"></i></summary><div class="expander-bd">${html}</div>`;
+  return d;
+}
+function renderStep(){
+  const step = STEPS[PROGRESS.step];
+  CURRENT_STEP = step;
+  if(step.preset) Object.assign(CONFIG, step.preset);
+  if(step.experiment && step.experiment.cfg) Object.assign(CONFIG, step.experiment.cfg);
+  if(step.walkthrough && LOCKED){
+    Object.assign(CONFIG, { strategy:LOCKED.strategy, nodes:LOCKED.nodes, perNode:LOCKED.perNode, nB:LOCKED.nB, vram:LOCKED.vram, batch:LOCKED.batch, seq:LOCKED.seq, ckpt:LOCKED.ckpt });
+  }
+  syncControls(CONFIG);
+
+  const badge = document.getElementById('guideBadge');
+  if(badge){
+    if(step.walkthrough && LOCKED){ badge.hidden = false; badge.innerHTML = `<i data-lucide="lock" class="w-3 h-3"></i>${lockSummary(LOCKED)}`; }
+    else { badge.hidden = true; badge.innerHTML = ''; }
+  }
+
+  document.getElementById('guideKicker').textContent = step.kicker || '';
+  document.getElementById('guideTitle').innerHTML = step.title || '';
+  document.getElementById('guideLede').innerHTML = step.lede || '';
+
+  const an = document.getElementById('guideAnalogy');
+  if(step.analogy){ an.innerHTML = step.analogy; an.hidden = false; } else { an.hidden = true; }
+
+  const ex = document.getElementById('guideExperiment');
+  if(step.experiment){
+    ex.hidden = false;
+    document.getElementById('exPrompt').innerHTML = step.experiment.prompt || '';
+    const st = document.getElementById('exState'); st.textContent = 'not yet'; st.className = 'ex-state';
+  } else { ex.hidden = true; }
+
+  const extras = document.getElementById('stepExtras'); extras.innerHTML = '';
+  if(step.math) extras.appendChild(expanderBox('sigma', 'Math derivation', 'math-box', step.math, 'var(--weights)'));
+  if(step.deep) extras.appendChild(expanderBox('microscope', 'Deep dive', 'deep-box', step.deep, 'var(--opt)'));
+  if(step.takeaway && step.takeaway.length){
+    const wrap = document.createElement('div'); wrap.className = 'takeaway';
+    wrap.innerHTML = step.takeaway.map(t=>`<span class="chip acts"><span class="dot"></span>${t}</span>`).join('');
+    extras.appendChild(wrap);
+  }
+
+  mountForStep(step);
+  const stepEl = document.querySelector('#guideView .step');
+  if(stepEl) stepEl.classList.toggle('step--anim', !!step.stage);
+  renderAll();
+  applyPrefs();
+  updateNav();
+
+  /* guided scroll: land on the step head, then keep the stage in view */
+  if(window.scrollY > 0) window.scrollTo({ top: 0, behavior: motionOff() ? 'auto' : 'smooth' });
+  requestAnimationFrame(()=>scrollToStage());
+
+  const hasAnim = (step.panels || []).includes('topology');
+  if(PREFS.autoplay && !motionOff() && hasAnim) playAnim();
+}
+function showView(view){
+  PROGRESS.view = view; saveProgress();
+  const guide = view === 'guide';
+  document.body.classList.toggle('view-guide', guide);
+  document.body.classList.toggle('view-explore', !guide);
+  document.getElementById('guideView').hidden = !guide;
+  document.getElementById('exploreView').hidden = guide;
+  document.getElementById('exploreToggleLabel').textContent = guide ? 'Explore' : 'Guide';
+  if(guide){ renderStep(); }
+  else { CURRENT_STEP = null; mountExplore(); renderAll(); }
+  if(window.lucide) lucide.createIcons();
+}
+function gotoStep(i){
+  i = Math.max(0, Math.min(STEPS.length-1, i));
+  if(PROGRESS.view !== 'guide'){ PROGRESS.step = i; showView('guide'); return; }
+  PROGRESS.step = i; saveProgress(); renderStep();
+}
+function wireShell(){
+  document.getElementById('prevBtn').addEventListener('click',()=>gotoStep(PROGRESS.step-1));
+  document.getElementById('nextBtn').addEventListener('click',()=>{
+    if(PROGRESS.step === STEPS.length-1) showView('explore');
+    else gotoStep(PROGRESS.step+1);
+  });
+  document.getElementById('exploreToggle').addEventListener('click',()=>showView(PROGRESS.view === 'guide' ? 'explore' : 'guide'));
+  document.getElementById('optionsBtn').addEventListener('click',(e)=>{
+    e.stopPropagation();
+    document.getElementById('optionsPop').hidden ? openOptions() : closeOptions();
+  });
+  document.getElementById('optionsPop').addEventListener('click',e=>e.stopPropagation());
+  document.getElementById('resetProgress').addEventListener('click',resetProgress);
+  document.addEventListener('click',closeOptions);
+  document.addEventListener('keydown',onKey);
+}
+function onKey(e){
+  if(e.target && e.target.matches && e.target.matches('input,textarea,select')) return;
+  if(e.key === 'Escape'){ closeOptions(); return; }
+  if(PROGRESS.view !== 'guide') return;
+  if(e.key === 'ArrowRight') gotoStep(PROGRESS.step+1);
+  else if(e.key === 'ArrowLeft') gotoStep(PROGRESS.step-1);
+  else if(e.key === ' ' && CURRENT_STEP && (CURRENT_STEP.panels||[]).includes('topology')){
+    e.preventDefault(); anim.playing ? pauseAnim() : playAnim();
+  }
+}
+function resetProgress(){
+  try{ localStorage.removeItem('dt-progress'); localStorage.removeItem('dt-prefs'); localStorage.removeItem('dt-theme'); localStorage.removeItem('dt-lock'); }catch(e){}
+  PROGRESS.step = 0; PROGRESS.completed = []; PROGRESS.view = 'guide';
+  LOCKED = null;
+  Object.assign(PREFS, { showMath:false, showDeepDive:false, glossary:true, advancedConfig:false, autoplay:true, reducedMotion:false, theme:'dark' });
+  Object.assign(CONFIG, { strategy:'z2', nodes:1, perNode:8, nB:7, batch:1, seq:4096, vram:80, ckpt:false });
+  applyTheme('dark'); renderOptions(); applyPrefs(); closeOptions();
+  showView('guide'); toast('Progress reset');
+}
+
+/* theme */
+function applyTheme(theme){
+  document.documentElement.setAttribute('data-theme', theme);
+  PREFS.theme = theme;
+  try{ localStorage.setItem('dt-theme', theme); }catch(e){}
+  setSeg('theme', theme);
+  if(document.getElementById('memChart')) renderCharts(CONFIG);
+  if(PHASES.length) buildPackets(PHASES[anim.index]);
+  drawFrame();
+  if(window.lucide) lucide.createIcons();
+}
+function initTheme(){
+  let theme = 'dark';
+  try{ theme = PREFS.theme || localStorage.getItem('dt-theme') || theme; }catch(e){}
+  applyTheme(theme);
+}
+function wireStepper(){
+  document.querySelectorAll('#stepper button').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const lid = +btn.dataset.lesson;
+      const idx = STEPS.findIndex(s=>s.lesson === lid);
+      if(idx >= 0) gotoStep(idx);
+    });
+  });
+}
+
+/* click a GPU on the ring to make it the X-ray focus */
+function wireRingClick(){
+  const host = document.getElementById('topology');
+  if(!host) return;
+  host.addEventListener('click', e=>{
+    const g = e.target.closest('.gpu[data-gpu]');
+    if(!g) return;
+    const i = +g.dataset.gpu;
+    if(i === FOCUS_GPU) return;
+    FOCUS_GPU = i;
+    host.querySelectorAll('.gpu.sel').forEach(el=>el.classList.remove('sel'));
+    g.classList.add('sel');
+    renderXray(CONFIG);
+    if(window.lucide) lucide.createIcons();
+  });
+}
+
+function init(){
+  captureHomes();
+  loadState();
+  initTheme();
+  renderStepper();
+  renderOptions();
+  applyPrefs();
+  wireSegments();
+  wireInputs();
+  wireStepper();
+  wireTransport();
+  wireShell();
+  wireRingClick();
+  wireLockers();
+  const ref = document.getElementById('reference');
+  if(ref) ref.addEventListener('toggle', ()=>{ if(ref.open) renderCharts(CONFIG); });
+  let rz;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(rz);
+    rz = setTimeout(()=>{
+      layoutFlow();
+      if(PHASES.length) buildPackets(PHASES[anim.index]);
+      drawFrame();
+    }, 160);
+  });
+  showView(PROGRESS.view || 'guide');
+}
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
